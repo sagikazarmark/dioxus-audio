@@ -1,0 +1,386 @@
+.dioxus-audio {
+  --_dxa-base-100: var(--dioxus-audio-base-100, var(--color-base-100, #ffffff));
+  --_dxa-base-200: var(--dioxus-audio-base-200, var(--color-base-200, #f3f4f6));
+  --_dxa-base-300: var(--dioxus-audio-base-300, var(--color-base-300, #d1d5db));
+  --_dxa-content: var(--dioxus-audio-content, var(--color-base-content, #18181b));
+  --_dxa-primary: var(--dioxus-audio-primary, var(--color-primary, #2563eb));
+  --_dxa-warning: var(--dioxus-audio-warning, var(--color-warning, #d97706));
+  --_dxa-error: var(--dioxus-audio-error, var(--color-error, #dc2626));
+  --_dxa-success: var(--dioxus-audio-success, var(--color-success, #16a34a));
+  --_dxa-radius: var(--dioxus-audio-radius, var(--radius-field, 0.5rem));
+  color: var(--_dxa-content);
+  font: inherit;
+}
+
+.dioxus-audio,
+.dioxus-audio *,
+.dioxus-audio *::before,
+.dioxus-audio *::after {
+  box-sizing: border-box;
+}
+
+.dioxus-audio__scrubber {
+  position: relative;
+  width: 100%;
+  height: 1.25rem;
+}
+
+.dioxus-audio__scrubber-track {
+  position: absolute;
+  top: 50%;
+  width: 100%;
+  height: 0.25rem;
+  overflow: hidden;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: var(--_dxa-base-300);
+}
+
+.dioxus-audio__scrubber-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--_dxa-primary);
+}
+
+.dioxus-audio__scrubber-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.dioxus-audio__scrubber:has(.dioxus-audio__scrubber-input:focus-visible) .dioxus-audio__scrubber-track {
+  outline: 2px solid var(--_dxa-primary);
+  outline-offset: 2px;
+}
+
+.dioxus-audio__waveform {
+  display: block;
+  min-width: 0;
+  color: var(--_dxa-primary);
+}
+
+.dioxus-audio__waveform rect {
+  fill: currentColor;
+}
+
+.dioxus-audio__waveform-idle {
+  stroke: currentColor;
+  stroke-dasharray: 2 3;
+  opacity: 0.35;
+}
+
+.dioxus-audio__range {
+  position: relative;
+  width: 100%;
+  min-height: 2rem;
+}
+
+.dioxus-audio__range-selection {
+  position: absolute;
+  inset-block: 0;
+  pointer-events: none;
+  border-inline: 2px solid var(--_dxa-primary);
+  background: color-mix(in srgb, var(--_dxa-primary) 14%, transparent);
+}
+
+.dioxus-audio__range-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  margin: 0;
+  pointer-events: none;
+  appearance: none;
+  background: transparent;
+}
+
+.dioxus-audio__range:has(.dioxus-audio__range-input:focus-visible) {
+  outline: 2px solid var(--_dxa-primary);
+  outline-offset: 2px;
+  border-radius: var(--_dxa-radius);
+}
+
+.dioxus-audio__range-input:focus {
+  z-index: 1;
+}
+
+.dioxus-audio__range-input::-webkit-slider-thumb {
+  width: 1.5rem;
+  height: 2.75rem;
+  pointer-events: auto;
+  cursor: ew-resize;
+  appearance: none;
+  border: 2px solid var(--_dxa-primary);
+  border-radius: 999px;
+  background: var(--_dxa-base-100);
+}
+
+.dioxus-audio__range-input::-moz-range-thumb {
+  width: 1.5rem;
+  height: 2.75rem;
+  pointer-events: auto;
+  cursor: ew-resize;
+  border: 2px solid var(--_dxa-primary);
+  border-radius: 999px;
+  background: var(--_dxa-base-100);
+}
+
+.dioxus-audio__range[data-collapsed="true"] .dioxus-audio__range-input--start::-webkit-slider-thumb {
+  transform: translateX(-0.75rem);
+}
+
+.dioxus-audio__range[data-collapsed="true"] .dioxus-audio__range-input--end::-webkit-slider-thumb {
+  transform: translateX(0.75rem);
+}
+
+.dioxus-audio__range[data-collapsed="true"] .dioxus-audio__range-input--start::-moz-range-thumb {
+  transform: translateX(-0.75rem);
+}
+
+.dioxus-audio__range[data-collapsed="true"] .dioxus-audio__range-input--end::-moz-range-thumb {
+  transform: translateX(0.75rem);
+}
+
+.dioxus-audio__visualizer {
+  display: flex;
+  width: 100%;
+  height: 4rem;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--_dxa-primary);
+}
+
+.dioxus-audio__visualizer-bar {
+  min-width: 1px;
+  max-width: 0.375rem;
+  flex: 1;
+  border-radius: 999px;
+  background: currentColor;
+  transition: height 50ms linear;
+}
+
+.dioxus-audio__meter {
+  width: 100%;
+  height: 0.5rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--_dxa-base-300);
+}
+
+.dioxus-audio__meter-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--_dxa-success), var(--_dxa-warning), var(--_dxa-error));
+  transition: width 50ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dioxus-audio__visualizer-bar,
+  .dioxus-audio__meter-fill {
+    transition: none;
+  }
+}
+
+.dioxus-audio__device {
+  display: grid;
+  gap: 0.375rem;
+  width: 100%;
+}
+
+.dioxus-audio__device-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.dioxus-audio__device-select {
+  width: 100%;
+  min-height: 2.5rem;
+  padding: 0.5rem 2rem 0.5rem 0.75rem;
+  border: 1px solid var(--_dxa-base-300);
+  border-radius: var(--_dxa-radius);
+  background: var(--_dxa-base-100);
+  color: var(--_dxa-content);
+  font: inherit;
+}
+
+.dioxus-audio__device-select:focus-visible,
+.dioxus-audio__retry:focus-visible {
+  outline: 2px solid var(--_dxa-primary);
+  outline-offset: 2px;
+}
+
+.dioxus-audio__device-help {
+  font-size: 0.75rem;
+  opacity: 0.65;
+}
+
+.dioxus-audio__device-help--error {
+  color: var(--_dxa-error);
+  opacity: 1;
+}
+
+.dioxus-audio__microphone-status {
+  display: flex;
+  min-height: 1.75rem;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+}
+
+.dioxus-audio__microphone-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  flex: none;
+  border-radius: 999px;
+  background: var(--_dxa-base-300);
+}
+
+.dioxus-audio__microphone-status[data-state="ready"] .dioxus-audio__microphone-dot {
+  background: var(--_dxa-success);
+}
+
+.dioxus-audio__microphone-status[data-state="recording"] .dioxus-audio__microphone-dot {
+  background: var(--_dxa-error);
+  box-shadow: 0 0 0 0.25rem color-mix(in srgb, var(--_dxa-error) 18%, transparent);
+}
+
+.dioxus-audio__microphone-status[data-state="warning"] .dioxus-audio__microphone-dot,
+.dioxus-audio__microphone-status[data-state="paused"] .dioxus-audio__microphone-dot {
+  background: var(--_dxa-warning);
+}
+
+.dioxus-audio__microphone-status[data-state="error"] {
+  color: var(--_dxa-error);
+}
+
+.dioxus-audio__retry {
+  margin-inline-start: auto;
+  padding: 0.25rem 0.5rem;
+  border: 0;
+  border-radius: var(--_dxa-radius);
+  background: var(--_dxa-base-200);
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dioxus-audio__player {
+  width: 100%;
+}
+
+.dioxus-audio__player-times {
+  display: flex;
+  justify-content: space-between;
+  color: color-mix(in srgb, var(--_dxa-content) 58%, transparent);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.dioxus-audio__player-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding-block: 0.5rem;
+}
+
+.dioxus-audio__control,
+.dioxus-audio__rate {
+  display: inline-flex;
+  width: 2.5rem;
+  height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--_dxa-content);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dioxus-audio__control--primary {
+  width: 3rem;
+  height: 3rem;
+  background: var(--_dxa-primary);
+  color: var(--dioxus-audio-primary-content, var(--color-primary-content, #ffffff));
+}
+
+.dioxus-audio__control:hover:not(:disabled),
+.dioxus-audio__rate:hover:not(:disabled) {
+  background-color: var(--_dxa-base-200);
+}
+
+.dioxus-audio__control--primary:hover:not(:disabled) {
+  filter: brightness(0.94);
+  background-color: var(--_dxa-primary);
+}
+
+.dioxus-audio__control:focus-visible,
+.dioxus-audio__rate:focus-visible {
+  outline: 2px solid var(--_dxa-primary);
+  outline-offset: 2px;
+}
+
+.dioxus-audio__control:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.dioxus-audio__rate {
+  background: var(--_dxa-base-200);
+  font-size: 0.75rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.dioxus-audio__player-error {
+  color: var(--_dxa-error);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.dioxus-audio__recorder-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.dioxus-audio__record-action {
+  display: inline-flex;
+  width: 2.75rem;
+  height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--_dxa-base-200);
+  color: var(--_dxa-content);
+  cursor: pointer;
+}
+
+.dioxus-audio__record-action--record,
+.dioxus-audio__record-action--stop {
+  width: 3.5rem;
+  height: 3.5rem;
+  background: var(--_dxa-error);
+  color: #ffffff;
+}
+
+.dioxus-audio__record-action:focus-visible {
+  outline: 2px solid var(--_dxa-primary);
+  outline-offset: 2px;
+}
+
+.dioxus-audio__record-action:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}

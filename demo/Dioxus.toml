@@ -1,0 +1,9 @@
+[application]
+name = "demo"
+default_platform = "web"
+
+[web.app]
+title = "dioxus-audio demo"
+
+[web.watcher]
+watch_path = ["src", "../src", "../assets"]

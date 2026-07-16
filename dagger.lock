@@ -1,0 +1,7 @@
+[["version","1"]]
+["","container.from",["docker.io/denoland/deno:latest","linux/arm64"],"sha256:6288db6be1c26473bb9d1843f906d9a219c0dda57fd85de4aac90296951cf6ef","pin"]
+["","container.from",["docker.io/library/node:latest","linux/arm64"],"sha256:0473e7dc433a1310f436edee02aa79737ec78a4b345433ab0963d4a256f9ad85","pin"]
+["","container.from",["docker.io/library/rust:1.97-trixie","linux/arm64"],"sha256:9a2cd304a852f05d3352f75bc2775242371c0169a72dbb40d5d881379d571989","pin"]
+["","container.from",["docker.io/oven/bun:latest","linux/arm64"],"sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4","pin"]
+["","git.head",["https://github.com/rustsec/advisory-db.git"],"9f3e138091487e69144f536d36976e427a7a3307","float"]
+["","git.head",["https://github.com/sagikazarmark/daggerverse-beta"],"e96ac15774c610fdc1809f3baa06816756fbdabc","float"]

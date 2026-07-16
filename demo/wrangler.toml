@@ -1,0 +1,12 @@
+name = "dioxus-audio-demo"
+compatibility_date = "2026-07-16"
+
+send_metrics = false
+workers_dev = true
+preview_urls = true
+
+route = { pattern = "audio-demo.dioxus.cc", custom_domain = true, zone_name = "dioxus.cc" }
+
+[assets]
+directory = "dist/public"
+not_found_handling = "single-page-application"

@@ -3,10 +3,13 @@
   "private": true,
   "scripts": {
     "build": "tailwindcss -i src/style.css -o build/style.css --minify",
-    "watch": "tailwindcss -i src/style.css -o build/style.css --watch"
+    "watch": "tailwindcss -i src/style.css -o build/style.css --watch",
+    "test": "playwright test --config playwright.config.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61",
     "@tailwindcss/cli": "^4.3",
+    "@types/node": "^26.1",
     "daisyui": "^5.6",
     "tailwindcss": "^4.3",
     "wrangler": "^4"

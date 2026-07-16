@@ -1,7 +1,6 @@
 type Demo {
   let jsEnv: JavascriptEnvironment!
   let dioxus: Dioxus!
-  let wasmPack: WasmPack!
 
   new(rustVersion: String!) {
     # clang is needed to cross-compile the C sysroot pulled in
@@ -20,13 +19,6 @@ type Demo {
     let cargoGitDbCache = Dagger.cacheVolume("cargo-git-db")
 
     self.jsEnv = Dagger.javascriptEnvironment(install: true, locked: true)
-    self.wasmPack = Dagger.wasmPack(
-      container: rustContainer,
-      noCache: true, # Disabling target cache: if it gets evicted during a build, the build will fail.
-      cargoRegistryIndexCache: cargoRegistryIndexCache,
-      cargoRegistryArchiveCache: cargoRegistryArchiveCache,
-      cargoGitDbCache: cargoGitDbCache,
-    )
     self.dioxus = Dagger.dioxus(
       container: rustContainer,
       noCache: true, # Disabling target cache: if it gets evicted during a build, the build will fail.
@@ -97,6 +89,32 @@ type Demo {
     self
       .dioxus
       .serve(self.withAssets(ws), port: 8080)
+  }
+
+  """
+  Run end-to-end tests.
+  """
+  test(ws: Workspace!): Directory! @check {
+    let service = Dagger
+      .container
+      .from("caddy:2-alpine")
+      .withDirectory("/srv", self.build(ws))
+      .withFile(
+        "/etc/caddy/Caddyfile",
+        Dagger.currentModule.source.file("playwright.Caddyfile"),
+      )
+      .withExposedPort(8080)
+      .asService(args: ["caddy", "run", "--config", "/etc/caddy/Caddyfile"])
+
+    self
+      .jsEnv
+      .container(ws)
+      .withMountedCache("${HOME}/.cache/ms-playwright", Dagger.cacheVolume("ms-playwright"))
+      .withExec(["npm", "exec", "--", "playwright", "install", "chromium", "--with-deps"])
+      .withServiceBinding("demo", service)
+      .withEnvVariable("PLAYWRIGHT_BASE_URL", service.endpoint(scheme: "http"))
+      .withExec(["npm", "exec", "--", "playwright", "test", "--config", "playwright.config.ts"])
+      .directory("build/playwright")
   }
 
   """

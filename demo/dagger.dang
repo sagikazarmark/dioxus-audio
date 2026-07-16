@@ -82,6 +82,29 @@ type Demo {
       )
   }
 
+  let releaseService(ws: Workspace!): Service! {
+    Dagger
+      .container
+      .from("caddy:2-alpine")
+      .withDirectory("/srv", self.build(ws))
+      .withFile(
+        "/etc/caddy/Caddyfile",
+        Dagger.currentModule.source.file("playwright.Caddyfile"),
+      )
+      .withExposedPort(8080)
+      .asService(args: ["caddy", "run", "--config", "/etc/caddy/Caddyfile"])
+  }
+
+  let playwright(ws: Workspace!, service: Service!): Container! {
+    self
+      .jsEnv
+      .container(ws)
+      .withMountedCache("${HOME}/.cache/ms-playwright", Dagger.cacheVolume("ms-playwright"))
+      .withExec(["npm", "exec", "--", "playwright", "install", "chromium", "--with-deps"])
+      .withServiceBinding("demo", service)
+      .withEnvVariable("PLAYWRIGHT_BASE_URL", service.endpoint(scheme: "http"))
+  }
+
   """
   Serve the demo application.
   """
@@ -95,26 +118,24 @@ type Demo {
   Run end-to-end tests.
   """
   test(ws: Workspace!): Directory! @check {
-    let service = Dagger
-      .container
-      .from("caddy:2-alpine")
-      .withDirectory("/srv", self.build(ws))
-      .withFile(
-        "/etc/caddy/Caddyfile",
-        Dagger.currentModule.source.file("playwright.Caddyfile"),
-      )
-      .withExposedPort(8080)
-      .asService(args: ["caddy", "run", "--config", "/etc/caddy/Caddyfile"])
+    let service = self.releaseService(ws)
 
     self
-      .jsEnv
-      .container(ws)
-      .withMountedCache("${HOME}/.cache/ms-playwright", Dagger.cacheVolume("ms-playwright"))
-      .withExec(["npm", "exec", "--", "playwright", "install", "chromium", "--with-deps"])
-      .withServiceBinding("demo", service)
-      .withEnvVariable("PLAYWRIGHT_BASE_URL", service.endpoint(scheme: "http"))
+      .playwright(ws, service)
       .withExec(["npm", "exec", "--", "playwright", "test", "--config", "playwright.config.ts"])
       .directory("build/playwright")
+  }
+
+  """
+  Capture every demo page at mobile, tablet, and desktop resolutions.
+  """
+  screenshots(ws: Workspace!): Directory! {
+    let service = self.releaseService(ws)
+
+    self
+      .playwright(ws, service)
+      .withExec(["node", "screenshots.mjs"])
+      .directory("build/screenshots")
   }
 
   """

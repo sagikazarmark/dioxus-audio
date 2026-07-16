@@ -12,9 +12,5 @@ name = "javascript-environment"
 source = "github.com/sagikazarmark/daggerverse-beta/javascript-environment"
 
 [[dependencies]]
-name = "wasm-pack"
-source = "github.com/sagikazarmark/daggerverse-beta/wasm-pack"
-
-[[dependencies]]
 name = "wrangler"
 source = "github.com/sagikazarmark/daggerverse-beta/wrangler"

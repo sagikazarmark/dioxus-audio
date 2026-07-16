@@ -95,11 +95,21 @@ type Demo {
   Run end-to-end tests.
   """
   test(ws: Workspace!): Directory! @check {
-    let service = self.service(ws)
+    let service = Dagger
+      .container
+      .from("caddy:2-alpine")
+      .withDirectory("/srv", self.build(ws))
+      .withFile(
+        "/etc/caddy/Caddyfile",
+        Dagger.currentModule.source.file("playwright.Caddyfile"),
+      )
+      .withExposedPort(8080)
+      .asService(args: ["caddy", "run", "--config", "/etc/caddy/Caddyfile"])
 
     self
       .jsEnv
       .container(ws)
+      .withMountedCache("${HOME}/.cache/ms-playwright", Dagger.cacheVolume("ms-playwright"))
       .withExec(["npm", "exec", "--", "playwright", "install", "chromium", "--with-deps"])
       .withServiceBinding("demo", service)
       .withEnvVariable("PLAYWRIGHT_BASE_URL", service.endpoint(scheme: "http"))

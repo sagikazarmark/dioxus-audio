@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { Locator, Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
@@ -257,19 +258,42 @@ test("every teaching control is keyboard reachable and package focus stays visib
     await expect
       .poll(() => code.evaluate((node) => node.scrollTop))
       .toBeGreaterThan(0);
-
-    const link = recipe.getByRole("link", { name: "View production source" });
-    const popupPromise = page.waitForEvent("popup");
-    await link.focus();
-    await page.keyboard.press("Enter");
-    const popup = await popupPromise;
-    if (!popup.isClosed()) await popup.close();
   }
 
   const themeToggle = page.getByRole("button", { name: "Switch to dark theme" });
   await themeToggle.focus();
   await page.keyboard.press("Enter");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+});
+
+test("styled examples keep their spacing and recipes are highlighted in place", async ({
+  openRoute,
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openRoute("/styles", "Make audio UI belong to your application");
+
+  for (const card of [
+    page.locator(".studio-app"),
+    page.locator(".clip-editor.citrus"),
+    page.locator(".clip-editor.midnight"),
+  ]) {
+    await expect(card).toHaveCSS("padding-left", "20px");
+  }
+
+  const snippets = page.locator("pre[data-language]");
+  await expect(snippets).toHaveCount(6);
+  for (let index = 0; index < (await snippets.count()); index += 1) {
+    const tokens = snippets.nth(index).locator('code span[class^="a-"]');
+    expect(
+      await tokens.count(),
+      `snippet ${index + 1} has highlighted tokens`,
+    ).toBeGreaterThan(0);
+  }
+
+  await expect(
+    page.getByRole("link", { name: "View production source" }),
+  ).toHaveCount(0);
 });
 
 for (const viewport of [
@@ -553,7 +577,7 @@ test("Studio preview states preserve input selection and generated audio plays",
   ).toBeVisible();
 });
 
-test("Studio recipes are identical to independently fetched production sources", async ({
+test("Studio recipes are identical to production sources", async ({
   openRoute,
   page,
 }) => {
@@ -569,34 +593,17 @@ test("Studio recipes are identical to independently fetched production sources",
     hasText: "Studio stylesheet",
   });
 
-  const [rustHref, cssHref, renderedRust, renderedCss] = await Promise.all([
-    rustRecipe.getByRole("link", { name: "View production source" }).getAttribute("href"),
-    cssRecipe.getByRole("link", { name: "View production source" }).getAttribute("href"),
-    rustRecipe.locator('code[data-recipe-language="rust"]').textContent(),
-    cssRecipe.locator('code[data-recipe-language="css"]').textContent(),
+  const [rustSource, cssSource, renderedRust, renderedCss] = await Promise.all([
+    readFile("src/examples/styles/studio.rs", "utf8"),
+    readFile("src/examples/styles/studio.css", "utf8"),
+    rustRecipe.locator('pre[data-language="rust"] code').textContent(),
+    cssRecipe.locator('pre[data-language="css"] code').textContent(),
   ]);
-  expect(rustHref).toBeTruthy();
-  expect(cssHref).toBeTruthy();
 
-  const sources = await page.evaluate(async ([rustUrl, cssUrl]) => {
-    const [rustResponse, cssResponse] = await Promise.all([
-      fetch(rustUrl),
-      fetch(cssUrl),
-    ]);
-    return {
-      rust: { status: rustResponse.status, body: await rustResponse.text() },
-      css: { status: cssResponse.status, body: await cssResponse.text() },
-    };
-  }, [rustHref!, cssHref!]);
-  expect(sources.rust.status).toBe(200);
-  expect(sources.css.status).toBe(200);
-  expect(sources.rust.body).not.toContain("<title>dioxus-audio demo</title>");
-  expect(sources.css.body).not.toContain("<title>dioxus-audio demo</title>");
-
-  const extractedRust = extractRecipeRegion(sources.rust.body, "studio-recipe");
+  const extractedRust = extractRecipeRegion(rustSource, "studio-recipe");
   expect(renderedRust).toBe(extractedRust);
 
-  expect(renderedCss).toBe(sources.css.body);
+  expect(renderedCss).toBe(cssSource.trimEnd());
   const authoredTokens = {
     "--dioxus-audio-base-100": "#fffaf2",
     "--dioxus-audio-base-200": "#f2e9dc",
@@ -610,22 +617,21 @@ test("Studio recipes are identical to independently fetched production sources",
     "--dioxus-audio-radius": "1.15rem",
   } as const;
   for (const [name, value] of Object.entries(authoredTokens)) {
-    expect(sources.css.body).toContain(`${name}: ${value};`);
+    expect(cssSource).toContain(`${name}: ${value};`);
   }
 
-  const studioRuleStart = sources.css.body.indexOf(".studio-app {");
-  const studioRuleEnd = sources.css.body.indexOf("\n  }", studioRuleStart);
+  const studioRuleStart = cssSource.indexOf(".studio-app {");
+  const studioRuleEnd = cssSource.indexOf("\n  }", studioRuleStart);
   expect(studioRuleStart).toBeGreaterThanOrEqual(0);
   expect(studioRuleEnd).toBeGreaterThan(studioRuleStart);
-  const studioRule = sources.css.body.slice(studioRuleStart, studioRuleEnd);
+  const studioRule = cssSource.slice(studioRuleStart, studioRuleEnd);
   expect(studioRule.match(/--dioxus-audio-[\w-]+:/g)).toHaveLength(10);
   const outsideStudioRule =
-    sources.css.body.slice(0, studioRuleStart) +
-    sources.css.body.slice(studioRuleEnd);
+    cssSource.slice(0, studioRuleStart) + cssSource.slice(studioRuleEnd);
   expect(outsideStudioRule).not.toMatch(/--dioxus-audio-[\w-]+:/);
 });
 
-test("scoped recipes are identical to independently fetched production sources", async ({
+test("scoped recipes are identical to production sources", async ({
   openRoute,
   page,
 }) => {
@@ -640,33 +646,16 @@ test("scoped recipes are identical to independently fetched production sources",
   const cssRecipe = scoped.getByRole("article").filter({
     hasText: "Scoped-theme stylesheet",
   });
-  const [rustHref, cssHref, renderedRust, renderedCss] = await Promise.all([
-    rustRecipe.getByRole("link", { name: "View production source" }).getAttribute("href"),
-    cssRecipe.getByRole("link", { name: "View production source" }).getAttribute("href"),
-    rustRecipe.locator('code[data-recipe-language="rust"]').textContent(),
-    cssRecipe.locator('code[data-recipe-language="css"]').textContent(),
+  const [rustSource, cssSource, renderedRust, renderedCss] = await Promise.all([
+    readFile("src/examples/styles/scoped.rs", "utf8"),
+    readFile("src/examples/styles/scoped.css", "utf8"),
+    rustRecipe.locator('pre[data-language="rust"] code').textContent(),
+    cssRecipe.locator('pre[data-language="css"] code').textContent(),
   ]);
-  expect(rustHref).toBeTruthy();
-  expect(cssHref).toBeTruthy();
 
-  const sources = await page.evaluate(async ([rustUrl, cssUrl]) => {
-    const [rustResponse, cssResponse] = await Promise.all([
-      fetch(rustUrl),
-      fetch(cssUrl),
-    ]);
-    return {
-      rust: { status: rustResponse.status, body: await rustResponse.text() },
-      css: { status: cssResponse.status, body: await cssResponse.text() },
-    };
-  }, [rustHref!, cssHref!]);
-  expect(sources.rust.status).toBe(200);
-  expect(sources.css.status).toBe(200);
-  expect(sources.rust.body).not.toContain("<title>dioxus-audio demo</title>");
-  expect(sources.css.body).not.toContain("<title>dioxus-audio demo</title>");
-
-  const extractedRust = extractRecipeRegion(sources.rust.body, "scoped-recipe");
+  const extractedRust = extractRecipeRegion(rustSource, "scoped-recipe");
   expect(renderedRust).toBe(extractedRust);
-  expect(renderedCss).toBe(sources.css.body);
+  expect(renderedCss).toBe(cssSource.trimEnd());
 
   const authoredThemes = {
     citrus: expectedThemeSource({
@@ -689,11 +678,11 @@ test("scoped recipes are identical to independently fetched production sources",
     }),
   };
   for (const [theme, declarations] of Object.entries(authoredThemes)) {
-    const ruleStart = sources.css.body.indexOf(`.${theme} {`);
-    const ruleEnd = sources.css.body.indexOf("\n  }", ruleStart);
+    const ruleStart = cssSource.indexOf(`.${theme} {`);
+    const ruleEnd = cssSource.indexOf("\n  }", ruleStart);
     expect(ruleStart).toBeGreaterThanOrEqual(0);
     expect(ruleEnd).toBeGreaterThan(ruleStart);
-    const rule = sources.css.body.slice(ruleStart, ruleEnd);
+    const rule = cssSource.slice(ruleStart, ruleEnd);
     expect(rule.match(/--dioxus-audio-[\w-]+:/g)).toHaveLength(7);
     for (const declaration of declarations) {
       expect(rule).toContain(declaration);
@@ -713,24 +702,14 @@ test("daisyUI recipe is identical to its token-free production source", async ({
   const rustRecipe = fallback.getByRole("article").filter({
     hasText: "Rust composition",
   });
-  const [rustHref, renderedRust] = await Promise.all([
-    rustRecipe
-      .getByRole("link", { name: "View production source" })
-      .getAttribute("href"),
-    rustRecipe.locator('code[data-recipe-language="rust"]').textContent(),
+  const [rustSource, renderedRust] = await Promise.all([
+    readFile("src/examples/styles/daisy.rs", "utf8"),
+    rustRecipe.locator('pre[data-language="rust"] code').textContent(),
   ]);
-  expect(rustHref).toBeTruthy();
 
-  const source = await page.evaluate(async (rustUrl) => {
-    const response = await fetch(rustUrl);
-    return { status: response.status, body: await response.text() };
-  }, rustHref!);
-  expect(source.status).toBe(200);
-  expect(source.body).not.toContain("<title>dioxus-audio demo</title>");
-
-  const extractedRust = extractRecipeRegion(source.body, "daisy-recipe");
+  const extractedRust = extractRecipeRegion(rustSource, "daisy-recipe");
   expect(renderedRust).toBe(extractedRust);
-  expect(source.body).not.toMatch(/--dioxus-audio-[\w-]+\s*:/);
+  expect(rustSource).not.toMatch(/--dioxus-audio-[\w-]+\s*:/);
   expect(renderedRust).not.toMatch(/--dioxus-audio-[\w-]+\s*:/);
 });
 
@@ -849,18 +828,13 @@ function sourceRecipeControls(
   const recipes = sourceRecipeCards(chapter);
   for (let index = 0; index < count; index += 1) {
     const recipe = recipes.nth(index);
-    controls.push(
-      teachingControl(
-        recipe.getByRole("link", { name: "View production source" }),
-      ),
-      teachingControl(recipe.locator("pre")),
-    );
+    controls.push(teachingControl(recipe.locator("pre")));
   }
   return controls;
 }
 
 function sourceRecipeCards(container: Locator) {
-  return container.locator("article:has(code[data-recipe-language])");
+  return container.locator("article:has(pre[data-language])");
 }
 
 function teachingControl(control: Locator): TeachingControl {
@@ -1045,7 +1019,7 @@ async function expectGuideContainment(page: Page, viewportWidth: number) {
   expect(documentWidth.client).toBe(viewportWidth);
   expect(documentWidth.scroll).toBeLessThanOrEqual(documentWidth.client);
 
-  const recipeCode = page.locator("code[data-recipe-language]");
+  const recipeCode = page.locator("pre[data-language] code");
   await expect(recipeCode).toHaveCount(6);
   for (let index = 0; index < (await recipeCode.count()); index += 1) {
     await expect(recipeCode.nth(index)).toBeVisible();

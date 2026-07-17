@@ -23,11 +23,23 @@ version = "2.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "abb7a99c146e42da48d5783335814d9bd0f088143aa51fb5ea5b59855df5ca70"
 dependencies = [
+ "arborium-css",
  "arborium-highlight",
  "arborium-rust",
  "arborium-theme",
  "arborium-tree-sitter",
  "dlmalloc",
+]
+
+[[package]]
+name = "arborium-css"
+version = "2.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "040085bd355e439915eaeca9ed9db316a8dc3795f36c23948f216a808192376f"
+dependencies = [
+ "arborium-sysroot",
+ "cc",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -661,6 +673,7 @@ checksum = "859cbf40e5da690df269d4d1ab01b4ec9921b408cec4cabce2dd1620cc15670e"
 dependencies = [
  "arborium",
  "arborium-theme",
+ "arborium-tree-sitter",
  "dioxus",
  "dioxus-code-macro",
 ]

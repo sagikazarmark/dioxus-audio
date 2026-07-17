@@ -1,27 +1,17 @@
 //! Style customization guide.
 
 use dioxus::prelude::*;
+use dioxus_code::{Code, Language, SourceCode};
 
-use crate::components::{InlineCode, PageHeader};
+use crate::components::{InlineCode, PageHeader, snippet_theme};
 use crate::examples::styles::{DaisyExample, ScopedExample, StudioExample};
 
 const SETUP_SOURCE: &str = include_str!("../../snippets/styles_setup.rs");
 const STUDIO_MODULE: &str = include_str!("../examples/styles/studio.rs");
 const STUDIO_STYLESHEET: &str = include_str!("../examples/styles/studio.css");
-const STUDIO_RUST_ASSET: Asset = asset!("/src/examples/styles/studio.rs");
-const STUDIO_CSS_ASSET: Asset = asset!(
-    "/src/examples/styles/studio.css",
-    AssetOptions::css().with_minify(false)
-);
 const SCOPED_MODULE: &str = include_str!("../examples/styles/scoped.rs");
 const SCOPED_STYLESHEET: &str = include_str!("../examples/styles/scoped.css");
-const SCOPED_RUST_ASSET: Asset = asset!("/src/examples/styles/scoped.rs");
-const SCOPED_CSS_ASSET: Asset = asset!(
-    "/src/examples/styles/scoped.css",
-    AssetOptions::css().with_minify(false)
-);
 const DAISY_MODULE: &str = include_str!("../examples/styles/daisy.rs");
-const DAISY_RUST_ASSET: Asset = asset!("/src/examples/styles/daisy.rs");
 
 #[derive(Clone, Copy)]
 struct StyleToken {
@@ -112,7 +102,7 @@ pub fn Styles() -> Element {
                 InlineCode { "STYLESHEET" }
                 " only when the application needs the equivalent lower-level document stylesheet API."
             }
-            SourceBlock { language: "rust", source: SETUP_SOURCE }
+            SourceBlock { language: Language::Rust, source: SETUP_SOURCE }
         }
 
         section { aria_labelledby: "cascade-heading", class: "mt-10 rounded-2xl border border-base-300 bg-base-200/35 p-5",
@@ -151,15 +141,13 @@ pub fn Styles() -> Element {
                 div { class: "mt-4 grid gap-4 xl:grid-cols-2",
                     SourceRecipe {
                         title: "Rust composition",
-                        language: "rust",
+                        language: Language::Rust,
                         source: recipe_region(STUDIO_MODULE, "studio-recipe"),
-                        asset: STUDIO_RUST_ASSET,
                     }
                     SourceRecipe {
                         title: "Studio stylesheet",
-                        language: "css",
+                        language: Language::Css,
                         source: STUDIO_STYLESHEET,
-                        asset: STUDIO_CSS_ASSET,
                     }
                 }
             }
@@ -193,15 +181,13 @@ pub fn Styles() -> Element {
                 div { class: "mt-4 grid gap-4 xl:grid-cols-2",
                     SourceRecipe {
                         title: "Rust composition",
-                        language: "rust",
+                        language: Language::Rust,
                         source: recipe_region(SCOPED_MODULE, "scoped-recipe"),
-                        asset: SCOPED_RUST_ASSET,
                     }
                     SourceRecipe {
                         title: "Scoped-theme stylesheet",
-                        language: "css",
+                        language: Language::Css,
                         source: SCOPED_STYLESHEET,
-                        asset: SCOPED_CSS_ASSET,
                     }
                 }
             }
@@ -237,9 +223,8 @@ pub fn Styles() -> Element {
                 div { class: "mt-4",
                     SourceRecipe {
                         title: "Rust composition",
-                        language: "rust",
+                        language: Language::Rust,
                         source: recipe_region(DAISY_MODULE, "daisy-recipe"),
-                        asset: DAISY_RUST_ASSET,
                     }
                 }
             }
@@ -322,10 +307,10 @@ fn GuideStep(
 }
 
 #[component]
-fn SourceBlock(#[props(into)] language: String, #[props(into)] source: String) -> Element {
+fn SourceBlock(language: Language, #[props(into)] source: String) -> Element {
     rsx! {
-        pre { class: "mt-4 overflow-x-auto rounded-2xl border border-base-300 bg-base-200/60 p-4 text-xs leading-5 text-base-content/80",
-            code { "data-recipe-language": language, "{source}" }
+        div { class: "mt-4 overflow-hidden rounded-2xl border border-base-300 bg-base-200/60 text-base-content/80 [&_pre]:!bg-transparent [&_pre]:!text-xs [&_pre]:!leading-5",
+            Code { src: SourceCode::new(language, source), theme: snippet_theme() }
         }
     }
 }
@@ -333,24 +318,14 @@ fn SourceBlock(#[props(into)] language: String, #[props(into)] source: String) -
 #[component]
 fn SourceRecipe(
     #[props(into)] title: String,
-    #[props(into)] language: String,
+    language: Language,
     #[props(into)] source: String,
-    asset: Asset,
 ) -> Element {
     rsx! {
         article { class: "min-w-0 rounded-2xl border border-base-300 bg-base-200/35 p-4",
-            div { class: "flex items-center justify-between gap-3",
-                h3 { class: "text-sm font-semibold", "{title}" }
-                a {
-                    href: asset,
-                    class: "text-xs font-medium text-primary underline underline-offset-4",
-                    target: "_blank",
-                    rel: "noopener noreferrer",
-                    "View production source"
-                }
-            }
-            pre { class: "mt-3 max-h-[36rem] overflow-auto text-xs leading-5 text-base-content/80",
-                code { "data-recipe-language": language, "{source}" }
+            h3 { class: "text-sm font-semibold", "{title}" }
+            div { class: "mt-3 text-base-content/80 [&_pre]:max-h-[36rem] [&_pre]:!bg-transparent [&_pre]:!text-xs [&_pre]:!leading-5",
+                Code { src: SourceCode::new(language, source), theme: snippet_theme() }
             }
         }
     }

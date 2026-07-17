@@ -19,7 +19,7 @@ dioxus = { version = "0.7", default-features = false, features = [
     "signals",
     "web",
 ] }
-dioxus-code = "0.1"
+dioxus-code = { version = "0.1", features = ["lang-css"] }
 web-sys = { version = "0.3", features = ["Location"] }
 
 [profile.release]

@@ -4,6 +4,12 @@
 //! produced it. The router and shell live in `app`, reusable presentation in
 //! `components`, and the runnable examples in `examples`.
 
+// Arborium 2.18.1 declares this C ABI symbol but drops its sysroot at the final link.
+// Related upstream tracker: https://github.com/bearcove/arborium/issues/125
+#[cfg(target_family = "wasm")]
+#[unsafe(export_name = "stderr")]
+static ARBORIUM_STDERR: usize = 0;
+
 mod app;
 mod components;
 mod examples;

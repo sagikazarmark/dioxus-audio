@@ -82,7 +82,40 @@ type Demo {
       )
   }
 
-  let releaseService(ws: Workspace!): Service! {
+  """
+  Serve the demo application.
+  """
+  service(ws: Workspace!): Service! @up {
+    self
+      .dioxus
+      .serve(self.withAssets(ws), port: 8080)
+  }
+
+  """
+  Run end-to-end tests.
+  """
+  test(ws: Workspace!): Directory! @check {
+    let service = self.testService(ws)
+
+    self
+      .playwright(ws, service)
+      .withExec(["npm", "exec", "--", "playwright", "test", "--config", "playwright.config.ts"])
+      .directory("build/playwright")
+  }
+
+  """
+  Capture every demo page at mobile, tablet, and desktop resolutions.
+  """
+  screenshots(ws: Workspace!): Directory! {
+    let service = self.testService(ws)
+
+    self
+      .playwright(ws, service)
+      .withExec(["node", "screenshots.mjs"])
+      .directory("build/screenshots")
+  }
+
+  let testService(ws: Workspace!): Service! {
     Dagger
       .container
       .from("caddy:2-alpine")
@@ -99,43 +132,14 @@ type Demo {
     self
       .jsEnv
       .container(ws)
-      .withMountedCache("${HOME}/.cache/ms-playwright", Dagger.cacheVolume("ms-playwright"))
+      .withMountedCache(
+        "${HOME}/.cache/ms-playwright",
+        Dagger.cacheVolume("ms-playwright"),
+        expand: true,
+      )
       .withExec(["npm", "exec", "--", "playwright", "install", "chromium", "--with-deps"])
       .withServiceBinding("demo", service)
       .withEnvVariable("PLAYWRIGHT_BASE_URL", service.endpoint(scheme: "http"))
-  }
-
-  """
-  Serve the demo application.
-  """
-  service(ws: Workspace!): Service! @up {
-    self
-      .dioxus
-      .serve(self.withAssets(ws), port: 8080)
-  }
-
-  """
-  Run end-to-end tests.
-  """
-  test(ws: Workspace!): Directory! @check {
-    let service = self.releaseService(ws)
-
-    self
-      .playwright(ws, service)
-      .withExec(["npm", "exec", "--", "playwright", "test", "--config", "playwright.config.ts"])
-      .directory("build/playwright")
-  }
-
-  """
-  Capture every demo page at mobile, tablet, and desktop resolutions.
-  """
-  screenshots(ws: Workspace!): Directory! {
-    let service = self.releaseService(ws)
-
-    self
-      .playwright(ws, service)
-      .withExec(["node", "screenshots.mjs"])
-      .directory("build/screenshots")
   }
 
   """

@@ -14,8 +14,16 @@ pub use recorder::RecorderControls;
 pub use visualizer::{LevelMeter, LiveWaveform, SpectrumVisualizer};
 pub use waveform::{WaveformPreview, WaveformRangeSelector};
 
+/// The supported lower-level equivalent to rendering [`AudioStyles`].
+///
+/// Prefer [`AudioStyles`] unless the application needs to construct its own
+/// document stylesheet element.
 pub static STYLESHEET: Asset = asset!("/assets/dioxus-audio.css");
 
+/// The canonical component stylesheet loader.
+///
+/// Render this once near the application root so all audio components can use
+/// the packaged styles.
 #[component]
 pub fn AudioStyles() -> Element {
     rsx! { document::Stylesheet { href: STYLESHEET } }

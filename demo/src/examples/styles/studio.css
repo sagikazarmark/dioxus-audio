@@ -1,0 +1,98 @@
+@layer components {
+  .studio-app {
+    --dioxus-audio-base-100: #fffaf2;
+    --dioxus-audio-base-200: #f2e9dc;
+    --dioxus-audio-base-300: #d7c8b7;
+    --dioxus-audio-content: #241c2f;
+    --dioxus-audio-primary: #7446e8;
+    --dioxus-audio-primary-content: #ffffff;
+    --dioxus-audio-warning: #b86813;
+    --dioxus-audio-error: #c83d61;
+    --dioxus-audio-success: #2f8464;
+    --dioxus-audio-radius: 1.15rem;
+
+    border: 1px solid var(--dioxus-audio-base-300);
+    border-radius: 2rem;
+    background: var(--dioxus-audio-base-100);
+    color: var(--dioxus-audio-content);
+    padding: 1.25rem;
+    box-shadow: 0 20px 50px rgb(36 28 47 / 0.08);
+  }
+
+  .studio-app__header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--dioxus-audio-base-300);
+    padding-bottom: 1.25rem;
+  }
+
+  .studio-app__eyebrow,
+  .studio-app__panel-label,
+  .studio-app__preview-controls legend {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    opacity: 0.55;
+  }
+
+  .studio-app__title {
+    margin-top: 0.25rem;
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+  }
+
+  .studio-app__duration {
+    font-size: 0.875rem;
+    opacity: 0.6;
+  }
+
+  .studio-app__workspace {
+    display: grid;
+    gap: 1.5rem;
+    margin-top: 1.5rem;
+  }
+
+  .studio-app__input-panel,
+  .studio-app__audio-panel {
+    display: grid;
+    align-content: start;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .studio-app__preview-controls {
+    min-width: 0;
+  }
+
+  .studio-app__preview-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .studio-app__panel-label {
+    margin-bottom: 0.5rem;
+  }
+
+  @media (min-width: 40rem) {
+    .studio-app {
+      padding: 1.75rem;
+    }
+
+    .studio-app__header {
+      flex-direction: row;
+      align-items: end;
+      justify-content: space-between;
+    }
+  }
+
+  @media (min-width: 64rem) {
+    .studio-app__workspace {
+      grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    }
+  }
+}

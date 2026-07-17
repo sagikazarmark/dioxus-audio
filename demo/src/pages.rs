@@ -6,5 +6,6 @@ pub mod home;
 pub mod not_found;
 pub mod playback;
 pub mod recorder;
+pub mod styles;
 pub mod visualizers;
 pub mod waveforms;

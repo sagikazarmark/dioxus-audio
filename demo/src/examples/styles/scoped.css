@@ -1,0 +1,110 @@
+@layer components {
+  .clip-editor {
+    display: grid;
+    gap: 1.25rem;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--dioxus-audio-base-300);
+    border-radius: var(--dioxus-audio-radius);
+    background: var(--dioxus-audio-base-100);
+    color: var(--dioxus-audio-content);
+    padding: 1.25rem;
+  }
+
+  .citrus {
+    --dioxus-audio-base-100: #fff8e8;
+    --dioxus-audio-base-200: #f7e7c4;
+    --dioxus-audio-base-300: #d9b979;
+    --dioxus-audio-content: #422716;
+    --dioxus-audio-primary: #c4561f;
+    --dioxus-audio-primary-content: #fff8e8;
+    --dioxus-audio-radius: 1.25rem;
+
+    box-shadow: 0 18px 45px rgb(114 63 20 / 0.14);
+  }
+
+  .midnight {
+    --dioxus-audio-base-100: #091524;
+    --dioxus-audio-base-200: #10243a;
+    --dioxus-audio-base-300: #27425f;
+    --dioxus-audio-content: #e6f4ff;
+    --dioxus-audio-primary: #28c7d9;
+    --dioxus-audio-primary-content: #06202a;
+    --dioxus-audio-radius: 0.35rem;
+
+    box-shadow: 0 18px 45px rgb(3 11 21 / 0.35);
+  }
+
+  .clip-editor__header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 1rem;
+    border-bottom: 1px solid var(--dioxus-audio-base-300);
+    padding-bottom: 1rem;
+  }
+
+  .clip-editor__eyebrow,
+  .clip-editor__label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+
+  .clip-editor__title {
+    margin-top: 0.2rem;
+    font-size: 1.5rem;
+    font-weight: 750;
+    letter-spacing: -0.025em;
+  }
+
+  .clip-editor__scope {
+    border: 1px solid var(--dioxus-audio-base-300);
+    border-radius: 999px;
+    background: var(--dioxus-audio-base-200);
+    padding: 0.3rem 0.6rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.65rem;
+    white-space: nowrap;
+  }
+
+  .clip-editor__facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    font-size: 0.7rem;
+  }
+
+  .clip-editor__facts li {
+    border-radius: var(--dioxus-audio-radius);
+    background: var(--dioxus-audio-base-200);
+    padding: 0.35rem 0.55rem;
+  }
+
+  .clip-editor__range,
+  .clip-editor__playback {
+    min-width: 0;
+  }
+
+  .clip-editor__label {
+    margin-bottom: 0.6rem;
+  }
+
+  .clip-editor__selection {
+    display: block;
+    margin-top: 0.7rem;
+    text-align: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.75;
+  }
+
+  @media (min-width: 40rem) {
+    .clip-editor {
+      padding: 1.5rem;
+    }
+  }
+}

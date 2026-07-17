@@ -32,20 +32,23 @@ Load it once near the application root:
 
 ```rust
 use dioxus::prelude::*;
-use dioxus_audio::components::STYLESHEET;
+use dioxus_audio::components::AudioStyles;
 
 fn App() -> Element {
     rsx! {
-        document::Stylesheet { href: STYLESHEET }
+        AudioStyles {}
         // application UI
     }
 }
 ```
 
-The stylesheet uses standalone defaults and falls back to daisyUI 5 variables
-such as `--color-primary` when they exist. Applications can override stable
-package variables including `--dioxus-audio-primary`,
-`--dioxus-audio-content`, and `--dioxus-audio-base-200`.
+Stable package custom properties inherit, so applications can set them on an
+ancestor for app-wide styling or on a local wrapper for per-instance styling.
+When values are omitted, components can follow an installed daisyUI theme and
+otherwise use standalone defaults; daisyUI is optional.
+
+See the [Style Customization Guide](https://audio-demo.dioxus.cc/styles) for
+complete recipes and the public token reference.
 
 `WaveformPreview` normalizes each non-empty waveform against its own loudest
 peak (with a quiet-signal floor), so compact previews remain legible. It is a

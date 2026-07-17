@@ -1,6 +1,6 @@
 [package]
 name = "dioxus-audio"
-version = "0.0.0"
+version = "0.1.1"
 description = "Audio recording, playback, analysis, and UI components for Dioxus"
 edition = "2024"
 rust-version = "1.92"

@@ -1,3 +1,4 @@
+@import "./examples/styles/studio.css";
 @import "tailwindcss" source(none);
 
 @source "./**/*.rs";

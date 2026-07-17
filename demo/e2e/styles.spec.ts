@@ -1,4 +1,4 @@
-import type { Locator } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures";
 
@@ -136,6 +136,155 @@ test("daisyUI fallback chapter follows scoped examples with Playback and source 
   await expect(fallback.locator("pre")).toHaveCount(1);
   await expect(fallback.getByText("Why it works", { exact: true })).toBeVisible();
 });
+
+test("guide keeps the complete progression and stable reference in order", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/styles", "Make audio UI belong to your application");
+
+  const regions = await expectOrderedGuideContent(page);
+
+  const reference = regions.reference;
+  const expectedTokens = [
+    "--dioxus-audio-base-100",
+    "--dioxus-audio-base-200",
+    "--dioxus-audio-base-300",
+    "--dioxus-audio-content",
+    "--dioxus-audio-primary",
+    "--dioxus-audio-primary-content",
+    "--dioxus-audio-warning",
+    "--dioxus-audio-error",
+    "--dioxus-audio-success",
+    "--dioxus-audio-radius",
+  ];
+  const rows = reference.locator("tbody tr");
+  await expect(rows).toHaveCount(expectedTokens.length);
+  await expect(rows.locator("td:first-child")).toHaveText(expectedTokens);
+  await expect(reference.getByText("Where the stable boundary ends")).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Style guide prototype variants" }),
+  ).toHaveCount(0);
+});
+
+test("every teaching control is keyboard reachable and package focus stays visible", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => localStorage.setItem("demo-theme", "light"));
+  await openRoute("/styles", "Make audio UI belong to your application");
+
+  const studio = page.locator(".studio-app");
+  const citrus = page.locator(".clip-editor.citrus");
+  const midnight = page.locator(".clip-editor.midnight");
+  const fallback = page.getByRole("region", {
+    name: "daisyUI: automatic host-theme fallback",
+  });
+  const controls = teachingControls(page);
+  await page.getByRole("link", { name: "Analysis helpers" }).focus();
+  await page.keyboard.press("Tab");
+  for (const [index, { control, checkFocusRing }] of controls.entries()) {
+    if (index > 0) await page.keyboard.press("Tab");
+    await expect(control).toBeFocused();
+
+    if (checkFocusRing) {
+      await expectContrastingFocusRing(control, `control ${index + 1}`);
+    }
+  }
+
+  const input = studio.getByRole("combobox", { name: "Recording input" });
+  await expect(input.locator("option")).not.toHaveCount(1);
+  await input.focus();
+  await page.keyboard.press("KeyF");
+  await expect(input).not.toHaveValue("");
+  await expect(input.locator("option:checked")).toHaveText(/^Fake/);
+
+  const previewStates = [
+    ["Ready", "Microphone ready"],
+    ["Recording", "Recording"],
+    ["Muted", "Microphone muted by the device"],
+    ["Denied", "Microphone access denied"],
+  ] as const;
+  for (const [buttonName, statusText] of previewStates) {
+    const button = studio.getByRole("button", { name: buttonName });
+    await button.focus();
+    await page.keyboard.press("Enter");
+    await expect(button).toHaveAttribute("aria-pressed", "true");
+    await expect(
+      studio.getByRole("status").filter({ hasText: statusText }),
+    ).toHaveText(statusText);
+  }
+
+  for (const editor of [citrus, midnight]) {
+    for (const [name, key] of [
+      ["Selection start", "ArrowRight"],
+      ["Selection end", "ArrowLeft"],
+    ] as const) {
+      const slider = editor.getByRole("slider", { name });
+      const initialValue = await slider.inputValue();
+      await slider.focus();
+      await page.keyboard.press(key);
+      await expect(slider).not.toHaveValue(initialValue);
+    }
+  }
+
+  for (const example of [studio, citrus, midnight, fallback]) {
+    await exercisePlaybackWithKeyboard(example, page);
+  }
+
+  await expectKeyboardOrder(
+    page,
+    studio.getByRole("button", { name: "Denied" }),
+    playerControls(studio),
+  );
+  const scopedRecipes = sourceRecipeCards(guideRegions(page).scoped);
+  await expectKeyboardOrder(
+    page,
+    scopedRecipes.nth(1).locator("pre"),
+    playerControls(fallback),
+  );
+
+  const recipes = sourceRecipeCards(page.locator("main"));
+  await expect(recipes).toHaveCount(5);
+  for (let index = 0; index < (await recipes.count()); index += 1) {
+    const recipe = recipes.nth(index);
+    const code = recipe.locator("pre");
+    await code.evaluate((node) => {
+      node.scrollTop = 0;
+    });
+    await code.focus();
+    await page.keyboard.press("PageDown");
+    await expect
+      .poll(() => code.evaluate((node) => node.scrollTop))
+      .toBeGreaterThan(0);
+
+    const link = recipe.getByRole("link", { name: "View production source" });
+    const popupPromise = page.waitForEvent("popup");
+    await link.focus();
+    await page.keyboard.press("Enter");
+    const popup = await popupPromise;
+    if (!popup.isClosed()) await popup.close();
+  }
+
+  const themeToggle = page.getByRole("button", { name: "Switch to dark theme" });
+  await themeToggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+});
+
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "narrow phone", width: 390, height: 844 },
+] as const) {
+  test(`guide content and controls stay contained at ${viewport.name} width`, async ({
+    openRoute,
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await openRoute("/styles", "Make audio UI belong to your application");
+    await expectGuideContainment(page, viewport.width);
+  });
+}
 
 test("daisyUI fallback follows both host themes without changing explicit themes", async ({
   openRoute,
@@ -637,4 +786,414 @@ function expectedThemeSource(tokens: Record<string, string>): string[] {
   return Object.entries(tokens).map(
     ([name, value]) => `--dioxus-audio-${name}: ${value};`,
   );
+}
+
+type TeachingControl = {
+  control: Locator;
+  checkFocusRing: boolean;
+};
+
+function guideRegions(page: Page) {
+  return {
+    setup: page.getByRole("region", { name: "Stylesheet setup" }),
+    cascade: page.getByRole("region", { name: "How the cascade resolves" }),
+    studio: page.getByRole("region", {
+      name: "Studio: one complete app-wide theme",
+    }),
+    scoped: page.getByRole("region", {
+      name: "Citrus and Midnight: independently scoped clip editors",
+    }),
+    fallback: page.getByRole("region", {
+      name: "daisyUI: automatic host-theme fallback",
+    }),
+    reference: page.getByRole("region", { name: "Stable styling contract" }),
+    responsibility: page.getByRole("complementary", {
+      name: "Application-author responsibility",
+    }),
+  };
+}
+
+function teachingControls(page: Page): TeachingControl[] {
+  const regions = guideRegions(page);
+  const studio = page.locator(".studio-app");
+  const citrus = regions.scoped.locator(".clip-editor.citrus");
+  const midnight = regions.scoped.locator(".clip-editor.midnight");
+
+  return [
+    packageControl(studio.getByRole("combobox", { name: "Recording input" })),
+    teachingControl(studio.getByRole("button", { name: "Ready" })),
+    teachingControl(studio.getByRole("button", { name: "Recording" })),
+    teachingControl(studio.getByRole("button", { name: "Muted" })),
+    teachingControl(studio.getByRole("button", { name: "Denied" })),
+    packageControl(studio.getByRole("button", { name: "Play", exact: true })),
+    packageControl(studio.getByRole("button", { name: "Playback speed: 1x" })),
+    ...sourceRecipeControls(regions.studio, 2),
+    ...clipEditorControls(citrus),
+    ...clipEditorControls(midnight),
+    ...sourceRecipeControls(regions.scoped, 2),
+    packageControl(
+      regions.fallback.getByRole("button", { name: "Play", exact: true }),
+    ),
+    packageControl(
+      regions.fallback.getByRole("button", { name: "Playback speed: 1x" }),
+    ),
+    ...sourceRecipeControls(regions.fallback, 1),
+  ];
+}
+
+function sourceRecipeControls(
+  chapter: Locator,
+  count: number,
+): TeachingControl[] {
+  const controls: TeachingControl[] = [];
+  const recipes = sourceRecipeCards(chapter);
+  for (let index = 0; index < count; index += 1) {
+    const recipe = recipes.nth(index);
+    controls.push(
+      teachingControl(
+        recipe.getByRole("link", { name: "View production source" }),
+      ),
+      teachingControl(recipe.locator("pre")),
+    );
+  }
+  return controls;
+}
+
+function sourceRecipeCards(container: Locator) {
+  return container.locator("article:has(code[data-recipe-language])");
+}
+
+function teachingControl(control: Locator): TeachingControl {
+  return { control, checkFocusRing: false };
+}
+
+function packageControl(control: Locator): TeachingControl {
+  return { control, checkFocusRing: true };
+}
+
+function clipEditorControls(editor: Locator): TeachingControl[] {
+  return [
+    packageControl(editor.getByRole("slider", { name: "Selection start" })),
+    packageControl(editor.getByRole("slider", { name: "Selection end" })),
+    ...playerControls(editor).map(packageControl),
+  ];
+}
+
+function playerControls(example: Locator): Locator[] {
+  return [
+    example.getByRole("slider", { name: "Seek" }),
+    example.getByRole("button", { name: "Skip back 15 seconds" }),
+    example.getByRole("button", { name: "Play", exact: true }),
+    example.getByRole("button", { name: "Skip forward 15 seconds" }),
+    example.getByRole("button", { name: /^Playback speed:/ }),
+  ];
+}
+
+async function visibleFocusRing(control: Locator) {
+  return control.evaluate((node) => {
+    const element = node as HTMLElement;
+    const candidates: Element[] = [element];
+    if (element.parentElement) {
+      candidates.push(...element.parentElement.children);
+    }
+    let scope = element.parentElement;
+    while (scope && scope.tagName !== "MAIN") {
+      candidates.push(scope);
+      scope = scope.parentElement;
+    }
+    const outlined = [...new Set(candidates)].filter((candidate) => {
+      const styles = getComputedStyle(candidate);
+      return (
+        styles.opacity !== "0" &&
+        styles.visibility !== "hidden" &&
+        candidate.getBoundingClientRect().width > 0 &&
+        candidate.getBoundingClientRect().height > 0 &&
+        styles.outlineStyle !== "none" &&
+        parseFloat(styles.outlineWidth) > 0
+      );
+    });
+    if (outlined.length === 0) {
+      return { width: 0, style: "none", color: "", background: "", contrast: 0 };
+    }
+
+    return outlined
+      .map((target) => {
+        const targetStyles = getComputedStyle(target);
+        let ancestor = target.parentElement;
+        let background = "rgb(255, 255, 255)";
+        while (ancestor) {
+          const candidate = getComputedStyle(ancestor).backgroundColor;
+          const channels = canvasColor(candidate);
+          if (channels[3] > 0) {
+            background = candidate;
+            break;
+          }
+          ancestor = ancestor.parentElement;
+        }
+
+        return {
+          width: parseFloat(targetStyles.outlineWidth),
+          style: targetStyles.outlineStyle,
+          color: targetStyles.outlineColor,
+          background,
+          contrast: contrastRatio(
+            canvasColor(targetStyles.outlineColor),
+            canvasColor(background),
+          ),
+        };
+      })
+      .reduce((strongest, ring) =>
+        ring.contrast > strongest.contrast ? ring : strongest,
+      );
+
+    function canvasColor(color: string): Uint8ClampedArray {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("Canvas color conversion is unavailable");
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      return context.getImageData(0, 0, 1, 1).data;
+    }
+
+    function contrastRatio(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+      const luminance = (channels: Uint8ClampedArray) => {
+        const linear = Array.from(channels.slice(0, 3), (value) => {
+          const channel = value / 255;
+          return channel <= 0.04045
+            ? channel / 12.92
+            : ((channel + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+      };
+      const lighter = Math.max(luminance(a), luminance(b));
+      const darker = Math.min(luminance(a), luminance(b));
+      return (lighter + 0.05) / (darker + 0.05);
+    }
+  });
+}
+
+async function exercisePlaybackWithKeyboard(example: Locator, page: Page) {
+  const play = example.getByRole("button", { name: "Play", exact: true });
+  await play.focus();
+  await page.keyboard.press("Enter");
+  const pause = example.getByRole("button", { name: "Pause", exact: true });
+  await expect(pause).toBeVisible();
+  await pause.focus();
+  await page.keyboard.press("Enter");
+  await expect(example.getByRole("button", { name: "Play", exact: true })).toBeVisible();
+
+  const seek = example.getByRole("slider", { name: "Seek" });
+  await expect(seek).toBeEnabled();
+  const initialPosition = await seek.inputValue();
+  await seek.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(seek).not.toHaveValue(initialPosition);
+
+  const skipForward = example.getByRole("button", {
+    name: "Skip forward 15 seconds",
+  });
+  await skipForward.focus();
+  await page.keyboard.press("Enter");
+  await expect
+    .poll(() => seek.inputValue().then(Number))
+    .toBeGreaterThan(Number(initialPosition));
+
+  const skipBack = example.getByRole("button", {
+    name: "Skip back 15 seconds",
+  });
+  await skipBack.focus();
+  await page.keyboard.press("Enter");
+  await expect.poll(() => seek.inputValue().then(Number)).toBe(0);
+
+  const rate = example.getByRole("button", { name: "Playback speed: 1x" });
+  await rate.focus();
+  await page.keyboard.press("Enter");
+  await expect(
+    example.getByRole("button", { name: "Playback speed: 1.5x" }),
+  ).toBeVisible();
+}
+
+async function expectKeyboardOrder(
+  page: Page,
+  previous: Locator,
+  controls: Locator[],
+) {
+  await previous.focus();
+  for (const [index, control] of controls.entries()) {
+    await page.keyboard.press("Tab");
+    await expect(control).toBeFocused();
+    await expectContrastingFocusRing(control, `dynamic control ${index + 1}`);
+  }
+}
+
+async function expectGuideContainment(page: Page, viewportWidth: number) {
+  const regions = await expectOrderedGuideContent(page);
+  const orderedRegions = Object.values(regions);
+  for (let index = 1; index < orderedRegions.length; index += 1) {
+    const previous = await requiredBounds(orderedRegions[index - 1]);
+    const current = await requiredBounds(orderedRegions[index]);
+    expect(previous.y + previous.height).toBeLessThanOrEqual(current.y + 1);
+  }
+
+  const documentWidth = await page.evaluate(() => ({
+    client: document.documentElement.clientWidth,
+    scroll: document.documentElement.scrollWidth,
+  }));
+  expect(documentWidth.client).toBe(viewportWidth);
+  expect(documentWidth.scroll).toBeLessThanOrEqual(documentWidth.client);
+
+  const recipeCode = page.locator("code[data-recipe-language]");
+  await expect(recipeCode).toHaveCount(6);
+  for (let index = 0; index < (await recipeCode.count()); index += 1) {
+    await expect(recipeCode.nth(index)).toBeVisible();
+  }
+
+  const examples = [
+    page.locator(".studio-app"),
+    page.locator(".clip-editor.citrus"),
+    page.locator(".clip-editor.midnight"),
+    regions.fallback.locator("article").first(),
+  ];
+  for (const example of examples) {
+    const exampleBounds = await requiredBounds(example);
+    const controls = example.locator("button, select, input");
+    for (let index = 0; index < (await controls.count()); index += 1) {
+      expectBoundsWithin(await requiredBounds(controls.nth(index)), exampleBounds);
+    }
+  }
+
+  const mainBounds = await requiredBounds(page.locator("main"));
+  const codeBlocks = page.locator("pre");
+  let longCodeBlocks = 0;
+  for (let index = 0; index < (await codeBlocks.count()); index += 1) {
+    const block = codeBlocks.nth(index);
+    const bounds = await requiredBounds(block);
+    expectBoundsWithin(bounds, mainBounds);
+    const containerBounds = await block.evaluate((node) => {
+      const container = node.closest("article") ?? node.closest("section");
+      if (!container) throw new Error("Code block has no guide container");
+      const bounds = container.getBoundingClientRect();
+      return {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+      };
+    });
+    expectBoundsWithin(bounds, containerBounds);
+    const overlaps = await block.evaluate((node) => {
+      const main = node.closest("main");
+      if (!main) throw new Error("Code block is outside the guide");
+      const blockBounds = node.getBoundingClientRect();
+
+      return [...main.querySelectorAll("*")]
+        .filter(
+          (candidate) =>
+            candidate !== node &&
+            !candidate.contains(node) &&
+            !node.contains(candidate) &&
+            (candidate.tagName === "PRE" || !candidate.closest("pre")),
+        )
+        .filter((candidate) => {
+          const candidateBounds = candidate.getBoundingClientRect();
+          return (
+            candidateBounds.width > 0 &&
+            candidateBounds.height > 0 &&
+            blockBounds.left < candidateBounds.right &&
+            blockBounds.right > candidateBounds.left &&
+            blockBounds.top < candidateBounds.bottom &&
+            blockBounds.bottom > candidateBounds.top
+          );
+        })
+        .map((candidate) => candidate.tagName.toLowerCase());
+    });
+    expect(overlaps, `code block ${index + 1} overlaps guide content`).toEqual([]);
+    const overflow = await block.evaluate((node) => ({
+      client: node.clientWidth,
+      scroll: node.scrollWidth,
+      overflowX: getComputedStyle(node).overflowX,
+    }));
+    expect(overflow.overflowX).toMatch(/auto|scroll/);
+    if (overflow.scroll > overflow.client) longCodeBlocks += 1;
+  }
+  expect(longCodeBlocks).toBeGreaterThan(0);
+
+  const reference = regions.reference;
+  const table = reference.getByRole("table");
+  const tableScroller = table.locator("..");
+  await expect(reference.getByRole("row")).toHaveCount(11);
+  await expect(tableScroller).toHaveCSS("overflow-x", "auto");
+  if (viewportWidth === 390) {
+    const widths = await tableScroller.evaluate((node) => ({
+      client: node.clientWidth,
+      scroll: node.scrollWidth,
+    }));
+    expect(widths.scroll).toBeGreaterThan(widths.client);
+    await tableScroller.evaluate((node) => {
+      node.scrollLeft = node.scrollWidth;
+    });
+    const scrollerBounds = await requiredBounds(tableScroller);
+    const lastHeaderBounds = await requiredBounds(
+      reference.getByRole("columnheader", { name: "Standalone default" }),
+    );
+    expectBoundsWithin(lastHeaderBounds, scrollerBounds);
+  }
+}
+
+async function expectOrderedGuideContent(page: Page) {
+  const regions = guideRegions(page);
+  const orderedContent = Object.values(regions);
+  for (const content of orderedContent) await expect(content).toBeVisible();
+  await expectInDocumentOrder(orderedContent);
+  return regions;
+}
+
+async function expectContrastingFocusRing(control: Locator, label: string) {
+  const ring = await visibleFocusRing(control);
+  expect(ring.width, `focus ring for ${label}`).toBeGreaterThan(0);
+  expect(ring.style, `focus ring for ${label}`).not.toBe("none");
+  expect(
+    ring.contrast,
+    `focus ring ${ring.color} against ${ring.background} for ${label}`,
+  ).toBeGreaterThanOrEqual(3);
+}
+
+type Bounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+async function requiredBounds(locator: Locator): Promise<Bounds> {
+  const bounds = await locator.boundingBox();
+  expect(bounds).not.toBeNull();
+  return bounds!;
+}
+
+function expectBoundsWithin(inner: Bounds, outer: Bounds) {
+  expect(inner.x).toBeGreaterThanOrEqual(outer.x - 1);
+  expect(inner.y).toBeGreaterThanOrEqual(outer.y - 1);
+  expect(inner.x + inner.width).toBeLessThanOrEqual(outer.x + outer.width + 1);
+  expect(inner.y + inner.height).toBeLessThanOrEqual(outer.y + outer.height + 1);
+}
+
+async function expectInDocumentOrder(elements: Locator[]) {
+  for (let index = 1; index < elements.length; index += 1) {
+    const previous = elements[index - 1];
+    const current = elements[index];
+    expect(
+      await previous.evaluate(
+        (previousNode, currentNode) =>
+          Boolean(
+            previousNode.compareDocumentPosition(currentNode) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+          ),
+        await current.elementHandle(),
+      ),
+    ).toBe(true);
+  }
 }

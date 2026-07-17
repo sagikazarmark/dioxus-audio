@@ -219,15 +219,43 @@ fn public_docs_lead_with_the_canonical_stylesheet_loader() {
 }
 
 #[test]
-fn studio_recipe_region_is_well_formed() {
-    let studio = include_str!("../demo/src/examples/styles/studio.rs");
-    let recipe = strict_recipe_region(studio, "studio-recipe")
-        .expect("Studio must contain one valid recipe region");
+fn every_production_chapter_has_one_well_formed_recipe_region() {
+    let chapters: [(&str, &str, &str, &[&str]); 3] = [
+        (
+            "Studio",
+            include_str!("../demo/src/examples/styles/studio.rs"),
+            "studio-recipe",
+            &[
+                "pub fn StudioExample()",
+                "AudioInputSelector",
+                "WaveformPreview",
+                "AudioPlayer",
+            ],
+        ),
+        (
+            "scoped",
+            include_str!("../demo/src/examples/styles/scoped.rs"),
+            "scoped-recipe",
+            &["pub fn ScopedExample()"],
+        ),
+        (
+            "daisyUI",
+            include_str!("../demo/src/examples/styles/daisy.rs"),
+            "daisy-recipe",
+            &["pub fn DaisyExample()"],
+        ),
+    ];
 
-    assert!(recipe.contains("pub fn StudioExample()"));
-    assert!(recipe.contains("AudioInputSelector"));
-    assert!(recipe.contains("WaveformPreview"));
-    assert!(recipe.contains("AudioPlayer"));
+    for (chapter, source, region_name, required_snippets) in chapters {
+        let recipe = strict_recipe_region(source, region_name)
+            .unwrap_or_else(|error| panic!("{chapter} recipe is invalid: {error}"));
+        for expected in required_snippets {
+            assert!(
+                recipe.contains(expected),
+                "{chapter} recipe must contain {expected}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -316,6 +344,79 @@ fn studio_recipe_uses_the_exact_authored_theme() {
 }
 
 #[test]
+fn guide_uses_the_exact_scoped_stylesheet_and_token_free_daisy_recipe() {
+    let guide = include_str!("../demo/src/pages/styles.rs");
+    let demo_styles = include_str!("../demo/src/style.css");
+    let scoped_css = include_str!("../demo/src/examples/styles/scoped.css");
+    let daisy = include_str!("../demo/src/examples/styles/daisy.rs");
+    let expected_themes = [
+        (
+            ".citrus {",
+            [
+                ("--dioxus-audio-base-100", "#fff8e8"),
+                ("--dioxus-audio-base-200", "#f7e7c4"),
+                ("--dioxus-audio-base-300", "#d9b979"),
+                ("--dioxus-audio-content", "#422716"),
+                ("--dioxus-audio-primary", "#c4561f"),
+                ("--dioxus-audio-primary-content", "#fff8e8"),
+                ("--dioxus-audio-radius", "1.25rem"),
+            ],
+        ),
+        (
+            ".midnight {",
+            [
+                ("--dioxus-audio-base-100", "#091524"),
+                ("--dioxus-audio-base-200", "#10243a"),
+                ("--dioxus-audio-base-300", "#27425f"),
+                ("--dioxus-audio-content", "#e6f4ff"),
+                ("--dioxus-audio-primary", "#28c7d9"),
+                ("--dioxus-audio-primary-content", "#06202a"),
+                ("--dioxus-audio-radius", "0.35rem"),
+            ],
+        ),
+    ];
+
+    assert!(demo_styles.contains("@import \"./examples/styles/studio.css\";"));
+    assert!(demo_styles.contains("@import \"./examples/styles/scoped.css\";"));
+    assert_eq!(public_style_tokens(scoped_css).len(), 7);
+
+    for (selector, tokens) in expected_themes {
+        let rule = source_between(scoped_css, selector, "  }");
+        assert_eq!(
+            public_style_tokens(rule),
+            tokens.iter().map(|(name, _)| *name).collect(),
+            "{selector} must declare exactly its seven scoped tokens"
+        );
+        for (name, value) in tokens {
+            assert!(
+                rule.contains(&format!("{name}: {value};")),
+                "{selector} must declare {name} as {value}"
+            );
+        }
+    }
+
+    for source_wiring in [
+        "include_str!(\"../examples/styles/scoped.rs\")",
+        "include_str!(\"../examples/styles/scoped.css\")",
+        "source: recipe_region(SCOPED_MODULE, \"scoped-recipe\")",
+        "source: SCOPED_STYLESHEET",
+        "include_str!(\"../examples/styles/daisy.rs\")",
+        "source: recipe_region(DAISY_MODULE, \"daisy-recipe\")",
+    ] {
+        assert!(
+            guide.contains(source_wiring),
+            "guide recipe must use production source via {source_wiring}"
+        );
+    }
+
+    assert!(public_style_tokens(daisy).is_empty());
+    assert!(
+        !guide.contains("DAISY_STYLESHEET"),
+        "the daisyUI chapter must not introduce a package-token stylesheet"
+    );
+}
+
+#[test]
 fn production_guide_contains_no_prototype_routes_or_selectors() {
     let production_sources = [
         include_str!("../demo/src/app.rs"),
@@ -325,6 +426,9 @@ fn production_guide_contains_no_prototype_routes_or_selectors() {
         include_str!("../demo/src/examples/styles/mod.rs"),
         include_str!("../demo/src/examples/styles/studio.rs"),
         include_str!("../demo/src/examples/styles/studio.css"),
+        include_str!("../demo/src/examples/styles/scoped.rs"),
+        include_str!("../demo/src/examples/styles/scoped.css"),
+        include_str!("../demo/src/examples/styles/daisy.rs"),
         include_str!("../demo/src/style.css"),
     ];
 

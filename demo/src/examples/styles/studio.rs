@@ -23,7 +23,7 @@ pub fn StudioExample() -> Element {
                     p { class: "studio-app__eyebrow", "Studio / voice note 04" }
                     h3 { class: "studio-app__title", "Morning field notes" }
                 }
-                span { class: "studio-app__duration", "02:00 generated sample" }
+                span { class: "studio-app__duration", "00:02 generated sample" }
             }
 
             div { class: "studio-app__workspace",

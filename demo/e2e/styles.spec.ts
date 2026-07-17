@@ -877,13 +877,15 @@ async function visibleFocusRing(control: Locator) {
     }
     const outlined = [...new Set(candidates)].filter((candidate) => {
       const styles = getComputedStyle(candidate);
+      const outline = canvasColor(styles.outlineColor);
       return (
         styles.opacity !== "0" &&
         styles.visibility !== "hidden" &&
         candidate.getBoundingClientRect().width > 0 &&
         candidate.getBoundingClientRect().height > 0 &&
         styles.outlineStyle !== "none" &&
-        parseFloat(styles.outlineWidth) > 0
+        parseFloat(styles.outlineWidth) > 0 &&
+        outline[3] > 0
       );
     });
     if (outlined.length === 0) {

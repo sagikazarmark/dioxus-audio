@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::components::{InlineCode, PageHeader};
-use crate::examples::styles::{ScopedExample, StudioExample};
+use crate::examples::styles::{DaisyExample, ScopedExample, StudioExample};
 
 const SETUP_SOURCE: &str = include_str!("../../snippets/styles_setup.rs");
 const STUDIO_MODULE: &str = include_str!("../examples/styles/studio.rs");
@@ -20,6 +20,8 @@ const SCOPED_CSS_ASSET: Asset = asset!(
     "/src/examples/styles/scoped.css",
     AssetOptions::css().with_minify(false)
 );
+const DAISY_MODULE: &str = include_str!("../examples/styles/daisy.rs");
+const DAISY_RUST_ASSET: Asset = asset!("/src/examples/styles/daisy.rs");
 
 #[component]
 pub fn Styles() -> Element {
@@ -137,6 +139,44 @@ pub fn Styles() -> Element {
                 h3 { class: "font-semibold", "Why it works" }
                 p { class: "mt-2 max-w-[75ch] text-sm leading-6 text-base-content/65",
                     "Each ordinary wrapper establishes a local inheritance scope without adding a component-specific API. The clip-editor surfaces are application-owned wrapper styling; the package only consumes its public semantic values."
+                }
+            }
+        }
+
+        section { aria_labelledby: "daisy-heading", class: "mt-14",
+            p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-primary", "03 / Host theme" }
+            h2 { id: "daisy-heading", class: "mt-2 text-2xl font-semibold tracking-tight", "daisyUI: automatic host-theme fallback" }
+            p { class: "mt-5 text-xs font-semibold uppercase tracking-wider text-base-content/45", "What to notice" }
+            p { class: "mt-2 max-w-[75ch] text-sm leading-6 text-base-content/65",
+                "The Waveform and Playback controls follow the demo's light and dark theme. This example deliberately declares no "
+                InlineCode { "--dioxus-audio-*" }
+                " properties."
+            }
+
+            p { class: "mt-6 mb-3 text-xs font-semibold uppercase tracking-wider text-base-content/45", "Live demonstration" }
+            DaisyExample {}
+
+            div { class: "mt-6",
+                p { class: "text-xs font-semibold uppercase tracking-wider text-base-content/45", "Exact source recipe" }
+                p { class: "mt-2 max-w-[75ch] text-sm leading-6 text-base-content/65",
+                    "Repeated imports and deterministic Peaks and Audio Data from "
+                    InlineCode { "fixtures.rs" }
+                    " are omitted. The Rust below is extracted from the compiled chapter. There is no chapter stylesheet because the absence of a package-token declaration is the demonstrated behavior."
+                }
+                div { class: "mt-4",
+                    SourceRecipe {
+                        title: "Rust composition",
+                        language: "rust",
+                        source: recipe_region(DAISY_MODULE, "daisy-recipe"),
+                        asset: DAISY_RUST_ASSET,
+                    }
+                }
+            }
+
+            div { class: "mt-5 rounded-2xl border border-base-300 bg-base-100 p-5",
+                h3 { class: "font-semibold", "Why it works" }
+                p { class: "mt-2 max-w-[75ch] text-sm leading-6 text-base-content/65",
+                    "When a public package token is absent, each component value falls back to the corresponding daisyUI theme variable and then to its standalone default. daisyUI is optional and is not a package dependency."
                 }
             }
         }

@@ -1,3 +1,5 @@
+import type { Locator } from "@playwright/test";
+
 import { expect, test } from "./fixtures";
 
 test("style customization guide loads directly and through navigation", async ({
@@ -102,6 +104,155 @@ test("scoped chapter starts with otherwise identical clip editors", async ({
   }
 });
 
+test("daisyUI fallback chapter follows scoped examples with Playback and source recipe", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/styles", "Make audio UI belong to your application");
+
+  const scoped = page.getByRole("region", {
+    name: "Citrus and Midnight: independently scoped clip editors",
+  });
+  const fallback = page.getByRole("region", {
+    name: "daisyUI: automatic host-theme fallback",
+  });
+  await expect(fallback).toBeVisible();
+  expect(
+    await scoped.evaluate(
+      (scopedNode, fallbackNode) =>
+        Boolean(
+          scopedNode.compareDocumentPosition(fallbackNode) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        ),
+      await fallback.elementHandle(),
+    ),
+  ).toBe(true);
+
+  await expect(fallback.getByText("What to notice", { exact: true })).toBeVisible();
+  await expect(fallback.getByText("Live demonstration", { exact: true })).toBeVisible();
+  await expect(fallback.getByRole("img", { name: "Host theme waveform" })).toBeVisible();
+  await expect(fallback.getByRole("button", { name: "Play", exact: true })).toBeEnabled();
+  await expect(fallback.getByText("Exact source recipe", { exact: true })).toBeVisible();
+  await expect(fallback.locator("pre")).toHaveCount(1);
+  await expect(fallback.getByText("Why it works", { exact: true })).toBeVisible();
+});
+
+test("daisyUI fallback follows both host themes without changing explicit themes", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => localStorage.setItem("demo-theme", "light"));
+  await openRoute("/styles", "Make audio UI belong to your application");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+
+  const fallback = page.getByRole("region", {
+    name: "daisyUI: automatic host-theme fallback",
+  });
+  const waveform = fallback.getByRole("img", { name: "Host theme waveform" });
+  const skipBack = fallback.getByRole("button", { name: "Skip back 15 seconds" });
+  const play = fallback.getByRole("button", { name: "Play", exact: true });
+  const rate = fallback.getByRole("button", { name: "Playback speed: 1x" });
+  const seek = fallback.getByRole("slider", { name: "Seek" });
+  const publicTokens = [
+    "--dioxus-audio-base-200",
+    "--dioxus-audio-base-300",
+    "--dioxus-audio-content",
+    "--dioxus-audio-primary",
+    "--dioxus-audio-primary-content",
+  ];
+
+  for (const element of [waveform, skipBack, play, rate, seek]) {
+    const values = await readCustomProperties(element, publicTokens);
+    expect(values).toEqual(
+      Object.fromEntries(publicTokens.map((name) => [name, ""])),
+    );
+  }
+
+  const explicitThemeTokens = {
+    studio: [
+      "--dioxus-audio-base-100",
+      "--dioxus-audio-base-200",
+      "--dioxus-audio-base-300",
+      "--dioxus-audio-content",
+      "--dioxus-audio-primary",
+      "--dioxus-audio-primary-content",
+      "--dioxus-audio-warning",
+      "--dioxus-audio-error",
+      "--dioxus-audio-success",
+      "--dioxus-audio-radius",
+    ],
+    scoped: [
+      "--dioxus-audio-base-100",
+      "--dioxus-audio-base-200",
+      "--dioxus-audio-base-300",
+      "--dioxus-audio-content",
+      "--dioxus-audio-primary",
+      "--dioxus-audio-primary-content",
+      "--dioxus-audio-radius",
+    ],
+  };
+  const explicitThemes = [
+    [page.locator(".studio-app"), explicitThemeTokens.studio],
+    [page.locator(".clip-editor.citrus"), explicitThemeTokens.scoped],
+    [page.locator(".clip-editor.midnight"), explicitThemeTokens.scoped],
+  ] as const;
+  const snapshotExplicitThemes = () =>
+    Promise.all(
+      explicitThemes.map(([element, names]) =>
+        readCustomProperties(element, names),
+      ),
+    );
+  const explicitValuesBefore = await snapshotExplicitThemes();
+
+  const renderedFallbackStyles = () =>
+    Promise.all([
+      waveform.evaluate((node) => getComputedStyle(node).color),
+      skipBack.evaluate((node) => getComputedStyle(node).color),
+      rate.evaluate((node) => getComputedStyle(node).backgroundColor),
+      renderedScrubberSurfaceColor(seek),
+      play.evaluate((node) => getComputedStyle(node).backgroundColor),
+      play.evaluate((node) => getComputedStyle(node).color),
+    ]);
+  const renderedHostThemeStyles = () =>
+    page.locator("html").evaluate((root) => {
+      const declarations = [
+        ["color", "--color-primary"],
+        ["color", "--color-base-content"],
+        ["background-color", "--color-base-200"],
+        ["background-color", "--color-base-300"],
+        ["background-color", "--color-primary"],
+        ["color", "--color-primary-content"],
+      ] as const;
+
+      return declarations.map(([property, variable]) => {
+        const probe = document.createElement("span");
+        probe.style.setProperty(property, `var(${variable})`);
+        root.append(probe);
+        const value = getComputedStyle(probe).getPropertyValue(property);
+        probe.remove();
+        return value;
+      });
+    });
+
+  const lightFallbackStyles = await renderedFallbackStyles();
+  expect(lightFallbackStyles).toEqual(await renderedHostThemeStyles());
+
+  await page.getByRole("button", { name: "Switch to dark theme" }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  const darkFallbackStyles = await renderedFallbackStyles();
+  expect(darkFallbackStyles).toEqual(await renderedHostThemeStyles());
+  expect(darkFallbackStyles).not.toEqual(lightFallbackStyles);
+  expect(await snapshotExplicitThemes()).toEqual(explicitValuesBefore);
+
+  await play.click();
+  const pause = fallback.getByRole("button", { name: "Pause", exact: true });
+  await expect(pause).toBeVisible();
+  await pause.click();
+  await expect(
+    fallback.getByRole("button", { name: "Play", exact: true }),
+  ).toBeVisible();
+});
+
 test("Studio tokens inherit through every audio component without leaking", async ({
   openRoute,
   page,
@@ -132,21 +283,11 @@ test("Studio tokens inherit through every audio component without leaking", asyn
 
   for (const element of themedElements) {
     await expect(element).toBeVisible();
-    const values = await element.evaluate((node, names) => {
-      const styles = getComputedStyle(node);
-      return Object.fromEntries(
-        names.map((name) => [name, styles.getPropertyValue(name).trim()]),
-      );
-    }, tokenNames);
+    const values = await readCustomProperties(element, tokenNames);
     expect(values).toEqual(expectedTokens);
   }
 
-  const shellValues = await page.locator("main").evaluate((node, names) => {
-    const styles = getComputedStyle(node);
-    return Object.fromEntries(
-      names.map((name) => [name, styles.getPropertyValue(name).trim()]),
-    );
-  }, tokenNames);
+  const shellValues = await readCustomProperties(page.locator("main"), tokenNames);
   expect(shellValues).toEqual(
     Object.fromEntries(tokenNames.map((name) => [name, ""])),
   );
@@ -191,22 +332,12 @@ test("scoped tokens stay local while range and Playback remain independent", asy
       editor.getByRole("group", { name: "Select clip range" }),
       editor.getByRole("button", { name: "Play", exact: true }),
     ]) {
-      const values = await element.evaluate((node, names) => {
-        const styles = getComputedStyle(node);
-        return Object.fromEntries(
-          names.map((name) => [name, styles.getPropertyValue(name).trim()]),
-        );
-      }, tokenNames);
+      const values = await readCustomProperties(element, tokenNames);
       expect(values).toEqual(expectedTokens);
     }
   }
 
-  const pageValues = await page.locator("main").evaluate((node, names) => {
-    const styles = getComputedStyle(node);
-    return Object.fromEntries(
-      names.map((name) => [name, styles.getPropertyValue(name).trim()]),
-    );
-  }, tokenNames);
+  const pageValues = await readCustomProperties(page.locator("main"), tokenNames);
   expect(pageValues).toEqual(
     Object.fromEntries(tokenNames.map((name) => [name, ""])),
   );
@@ -313,18 +444,7 @@ test("Studio recipes are identical to independently fetched production sources",
   expect(sources.rust.body).not.toContain("<title>dioxus-audio demo</title>");
   expect(sources.css.body).not.toContain("<title>dioxus-audio demo</title>");
 
-  const startMarker = "// region: studio-recipe";
-  const endMarker = "// endregion: studio-recipe";
-  expect(sources.rust.body.split(startMarker)).toHaveLength(2);
-  expect(sources.rust.body.split(endMarker)).toHaveLength(2);
-  const start = sources.rust.body.indexOf(startMarker) + startMarker.length;
-  const end = sources.rust.body.indexOf(endMarker, start);
-  expect(end).toBeGreaterThan(start);
-  const extractedRust = sources.rust.body
-    .slice(start, end)
-    .replace(/^\n/, "")
-    .replace(/\n$/, "");
-  expect(extractedRust.trim()).not.toBe("");
+  const extractedRust = extractRecipeRegion(sources.rust.body, "studio-recipe");
   expect(renderedRust).toBe(extractedRust);
 
   expect(renderedCss).toBe(sources.css.body);
@@ -395,18 +515,7 @@ test("scoped recipes are identical to independently fetched production sources",
   expect(sources.rust.body).not.toContain("<title>dioxus-audio demo</title>");
   expect(sources.css.body).not.toContain("<title>dioxus-audio demo</title>");
 
-  const startMarker = "// region: scoped-recipe";
-  const endMarker = "// endregion: scoped-recipe";
-  expect(sources.rust.body.split(startMarker)).toHaveLength(2);
-  expect(sources.rust.body.split(endMarker)).toHaveLength(2);
-  const start = sources.rust.body.indexOf(startMarker) + startMarker.length;
-  const end = sources.rust.body.indexOf(endMarker, start);
-  expect(end).toBeGreaterThan(start);
-  const extractedRust = sources.rust.body
-    .slice(start, end)
-    .replace(/^\n/, "")
-    .replace(/\n$/, "");
-  expect(extractedRust.trim()).not.toBe("");
+  const extractedRust = extractRecipeRegion(sources.rust.body, "scoped-recipe");
   expect(renderedRust).toBe(extractedRust);
   expect(renderedCss).toBe(sources.css.body);
 
@@ -442,6 +551,87 @@ test("scoped recipes are identical to independently fetched production sources",
     }
   }
 });
+
+test("daisyUI recipe is identical to its token-free production source", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/styles", "Make audio UI belong to your application");
+
+  const fallback = page.getByRole("region", {
+    name: "daisyUI: automatic host-theme fallback",
+  });
+  const rustRecipe = fallback.getByRole("article").filter({
+    hasText: "Rust composition",
+  });
+  const [rustHref, renderedRust] = await Promise.all([
+    rustRecipe
+      .getByRole("link", { name: "View production source" })
+      .getAttribute("href"),
+    rustRecipe.locator('code[data-recipe-language="rust"]').textContent(),
+  ]);
+  expect(rustHref).toBeTruthy();
+
+  const source = await page.evaluate(async (rustUrl) => {
+    const response = await fetch(rustUrl);
+    return { status: response.status, body: await response.text() };
+  }, rustHref!);
+  expect(source.status).toBe(200);
+  expect(source.body).not.toContain("<title>dioxus-audio demo</title>");
+
+  const extractedRust = extractRecipeRegion(source.body, "daisy-recipe");
+  expect(renderedRust).toBe(extractedRust);
+  expect(source.body).not.toMatch(/--dioxus-audio-[\w-]+\s*:/);
+  expect(renderedRust).not.toMatch(/--dioxus-audio-[\w-]+\s*:/);
+});
+
+function readCustomProperties(element: Locator, names: readonly string[]) {
+  return element.evaluate((node, tokenNames) => {
+    const styles = getComputedStyle(node);
+    return Object.fromEntries(
+      tokenNames.map((name) => [name, styles.getPropertyValue(name).trim()]),
+    );
+  }, names);
+}
+
+async function renderedScrubberSurfaceColor(seek: Locator) {
+  await seek.scrollIntoViewIfNeeded();
+  return seek.evaluate((node) => {
+    const seekBounds = node.getBoundingClientRect();
+    const centerX = seekBounds.left + seekBounds.width / 2;
+    const centerY = seekBounds.top + seekBounds.height / 2;
+    const transparent = "rgba(0, 0, 0, 0)";
+    const surface = document.elementsFromPoint(centerX, centerY).find((candidate) => {
+      if (candidate === node) return false;
+
+      const bounds = candidate.getBoundingClientRect();
+      const background = getComputedStyle(candidate).backgroundColor;
+      return (
+        bounds.width >= seekBounds.width * 0.9 &&
+        bounds.height > 0 &&
+        bounds.height < seekBounds.height &&
+        background !== transparent
+      );
+    });
+
+    if (!surface) throw new Error("Seek control has no visible track surface");
+    return getComputedStyle(surface).backgroundColor;
+  });
+}
+
+function extractRecipeRegion(source: string, name: string): string {
+  const startMarker = `// region: ${name}`;
+  const endMarker = `// endregion: ${name}`;
+  expect(source.split(startMarker)).toHaveLength(2);
+  expect(source.split(endMarker)).toHaveLength(2);
+
+  const start = source.indexOf(startMarker) + startMarker.length;
+  const end = source.indexOf(endMarker, start);
+  expect(end).toBeGreaterThan(start);
+  const region = source.slice(start, end).replace(/^\n/, "").replace(/\n$/, "");
+  expect(region.trim()).not.toBe("");
+  return region;
+}
 
 function expectedThemeSource(tokens: Record<string, string>): string[] {
   return Object.entries(tokens).map(

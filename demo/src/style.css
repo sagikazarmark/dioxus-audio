@@ -1,4 +1,5 @@
 @import "./examples/styles/studio.css";
+@import "./examples/styles/scoped.css";
 @import "tailwindcss" source(none);
 
 @source "./**/*.rs";

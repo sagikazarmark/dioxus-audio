@@ -23,6 +23,77 @@ const SCOPED_CSS_ASSET: Asset = asset!(
 const DAISY_MODULE: &str = include_str!("../examples/styles/daisy.rs");
 const DAISY_RUST_ASSET: Asset = asset!("/src/examples/styles/daisy.rs");
 
+#[derive(Clone, Copy)]
+struct StyleToken {
+    public: &'static str,
+    role: &'static str,
+    daisy_fallback: &'static str,
+    standalone_default: &'static str,
+}
+
+const STYLE_TOKENS: [StyleToken; 10] = [
+    StyleToken {
+        public: "--dioxus-audio-base-100",
+        role: "Primary surfaces",
+        daisy_fallback: "--color-base-100",
+        standalone_default: "#ffffff",
+    },
+    StyleToken {
+        public: "--dioxus-audio-base-200",
+        role: "Secondary controls and surfaces",
+        daisy_fallback: "--color-base-200",
+        standalone_default: "#f3f4f6",
+    },
+    StyleToken {
+        public: "--dioxus-audio-base-300",
+        role: "Borders and tracks",
+        daisy_fallback: "--color-base-300",
+        standalone_default: "#d1d5db",
+    },
+    StyleToken {
+        public: "--dioxus-audio-content",
+        role: "Text and neutral controls",
+        daisy_fallback: "--color-base-content",
+        standalone_default: "#18181b",
+    },
+    StyleToken {
+        public: "--dioxus-audio-primary",
+        role: "Active controls, Waveforms, and focus",
+        daisy_fallback: "--color-primary",
+        standalone_default: "#2563eb",
+    },
+    StyleToken {
+        public: "--dioxus-audio-primary-content",
+        role: "Content on primary controls",
+        daisy_fallback: "--color-primary-content",
+        standalone_default: "#ffffff",
+    },
+    StyleToken {
+        public: "--dioxus-audio-warning",
+        role: "Muted, paused, and caution states",
+        daisy_fallback: "--color-warning",
+        standalone_default: "#d97706",
+    },
+    StyleToken {
+        public: "--dioxus-audio-error",
+        role: "Denied, failed, Recording, and stop states",
+        daisy_fallback: "--color-error",
+        standalone_default: "#dc2626",
+    },
+    StyleToken {
+        public: "--dioxus-audio-success",
+        role: "Ready states and meters",
+        daisy_fallback: "--color-success",
+        standalone_default: "#16a34a",
+    },
+    StyleToken {
+        public: "--dioxus-audio-radius",
+        role: "Component corner treatment",
+        daisy_fallback: "--radius-field",
+        standalone_default: "0.5rem",
+    },
+];
+
 #[component]
 pub fn Styles() -> Element {
     rsx! {
@@ -49,7 +120,7 @@ pub fn Styles() -> Element {
             p { class: "mt-2 max-w-[75ch] text-sm leading-6 text-base-content/65",
                 "Public "
                 InlineCode { "--dioxus-audio-*" }
-                " properties inherit normally. Set them on an app-level ancestor for app-wide branding; the nearest scoped wrapper supplies local values. Each omitted token falls back independently to its daisyUI variable, when available, and then to the standalone default. daisyUI is optional."
+                " properties inherit normally. The nearest explicit package value on the component or an ancestor wins, supporting both app-wide branding and local wrapper scopes. When no inherited package value exists, each omitted token independently falls through to its daisyUI variable, when available, and then to the standalone default. daisyUI is optional."
             }
         }
 
@@ -180,6 +251,58 @@ pub fn Styles() -> Element {
                 }
             }
         }
+
+        section { aria_labelledby: "style-token-reference", class: "mt-14",
+            p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-primary", "Reference" }
+            h2 { id: "style-token-reference", class: "mt-2 text-2xl font-semibold tracking-tight", "Stable styling contract" }
+            p { class: "mt-3 max-w-[75ch] text-sm leading-6 text-base-content/65",
+                "These inherited custom properties are the complete stable customization surface. Each row shows its semantic role and independent daisyUI-to-standalone fallback path."
+            }
+
+            div { class: "mt-6 overflow-x-auto rounded-2xl border border-base-300",
+                table { class: "w-full min-w-[48rem] border-collapse text-left text-sm",
+                    thead { class: "bg-base-200/60 text-xs uppercase tracking-wider text-base-content/55",
+                        tr {
+                            th { class: "px-4 py-3 font-semibold", scope: "col", "Public token" }
+                            th { class: "px-4 py-3 font-semibold", scope: "col", "Semantic role" }
+                            th { class: "px-4 py-3 font-semibold", scope: "col", "daisyUI fallback" }
+                            th { class: "px-4 py-3 font-semibold", scope: "col", "Standalone default" }
+                        }
+                    }
+                    tbody { class: "divide-y divide-base-300",
+                        for token in STYLE_TOKENS {
+                            tr { class: "align-top",
+                                td { class: "px-4 py-3", InlineCode { "{token.public}" } }
+                                td { class: "px-4 py-3 text-base-content/70", "{token.role}" }
+                                td { class: "px-4 py-3", InlineCode { "{token.daisy_fallback}" } }
+                                td { class: "px-4 py-3", InlineCode { "{token.standalone_default}" } }
+                            }
+                        }
+                    }
+                }
+            }
+
+            div { class: "mt-6 rounded-2xl border border-base-300 bg-base-100 p-5",
+                h3 { class: "font-semibold", "Where the stable boundary ends" }
+                p { class: "mt-2 max-w-[75ch] text-sm leading-6 text-base-content/65",
+                    "Private "
+                    InlineCode { "--_dxa-*" }
+                    " aliases, component classes, DOM structure, "
+                    InlineCode { "data-*" }
+                    " values, ARIA attributes, and native state selectors are implementation details, not stable customization hooks."
+                }
+                p { class: "mt-2 max-w-[75ch] text-sm leading-6 text-base-content/65",
+                    "The themed Studio and clip-editor wrapper surfaces shown above are application-owned presentation. Only the inherited public properties are part of the package styling contract."
+                }
+            }
+        }
+
+        aside { aria_labelledby: "application-author-responsibility", class: "mt-8 rounded-2xl border border-primary/25 bg-primary/5 p-5",
+            h2 { id: "application-author-responsibility", class: "text-lg font-semibold", "Application-author responsibility" }
+            p { class: "mt-2 max-w-[75ch] text-sm leading-6 text-base-content/70",
+                "The package supplies semantic tokens and fallbacks. Applications choosing custom values remain responsible for readable contrast, visible focus and interaction states, and distinguishable success, warning, and error states. Verified recipes cannot guarantee arbitrary overrides."
+            }
+        }
     }
 }
 
@@ -236,30 +359,44 @@ fn SourceRecipe(
 fn recipe_region<'a>(source: &'a str, name: &str) -> &'a str {
     let start_marker = format!("// region: {name}");
     let end_marker = format!("// endregion: {name}");
+    let starts = exact_line_ranges(source, &start_marker);
+    let ends = exact_line_ranges(source, &end_marker);
+
     assert_eq!(
-        source.match_indices(&start_marker).count(),
+        starts.len(),
         1,
         "recipe region {name:?} must have exactly one start marker"
     );
     assert_eq!(
-        source.match_indices(&end_marker).count(),
+        ends.len(),
         1,
         "recipe region {name:?} must have exactly one end marker"
     );
 
-    let start = source
-        .find(&start_marker)
-        .expect("validated recipe start marker")
-        + start_marker.len();
-    let rest = &source[start..];
-    let end = rest.find(&end_marker).unwrap_or_else(|| {
-        panic!("recipe region {name:?} end marker must follow its start marker")
-    });
-    let region = rest[..end].strip_prefix('\n').unwrap_or(&rest[..end]);
-    let region = region.strip_suffix('\n').unwrap_or(region);
+    let body_start = starts[0].1;
+    let body_end = ends[0].0;
+    assert!(
+        body_start <= body_end,
+        "recipe region {name:?} end marker must follow its start marker"
+    );
+    let region = source[body_start..body_end].trim_end_matches(['\r', '\n']);
     assert!(
         !region.trim().is_empty(),
         "recipe region {name:?} must not be empty"
     );
     region
+}
+
+fn exact_line_ranges(source: &str, marker: &str) -> Vec<(usize, usize)> {
+    let mut offset = 0;
+
+    source
+        .split_inclusive('\n')
+        .filter_map(|line| {
+            let start = offset;
+            offset += line.len();
+            let content = line.trim_end_matches(['\r', '\n']);
+            (content == marker).then_some((start, offset))
+        })
+        .collect()
 }

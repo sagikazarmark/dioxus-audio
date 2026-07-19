@@ -21,18 +21,26 @@ pub fn PlaybackExample() -> Element {
             AudioPlayer {
                 source,
                 duration_secs: 2.0,
-                on_request_audio: move |_| source.set(Some(sine_wave())),
+                on_request_audio: move |_| source.set(Some(sine_wave(440.0))),
             }
             div { class: "flex items-center justify-between gap-3 text-sm text-base-content/60",
                 span {
                     if loaded { "Audio bytes loaded" } else { "Audio loads on first play" }
                 }
                 if loaded {
-                    button {
-                        class: "btn btn-ghost btn-xs",
-                        r#type: "button",
-                        onclick: move |_| source.set(None),
-                        "Unload"
+                    div { class: "flex items-center gap-1",
+                        button {
+                            class: "btn btn-ghost btn-xs",
+                            r#type: "button",
+                            onclick: move |_| source.set(Some(sine_wave(660.0))),
+                            "Replace"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-xs",
+                            r#type: "button",
+                            onclick: move |_| source.set(None),
+                            "Unload"
+                        }
                     }
                 }
             }
@@ -49,7 +57,7 @@ fn preview_peaks() -> Vec<u8> {
         .collect()
 }
 
-fn sine_wave() -> AudioData {
+fn sine_wave(frequency: f32) -> AudioData {
     const SAMPLE_RATE: u32 = 44_100;
     const SECONDS: u32 = 2;
     const CHANNELS: u16 = 1;
@@ -75,7 +83,7 @@ fn sine_wave() -> AudioData {
     for index in 0..sample_count {
         let time = index as f32 / SAMPLE_RATE as f32;
         let edge = (time / 0.04).min(1.0) * ((SECONDS as f32 - time) / 0.08).min(1.0);
-        let sample = (440.0 * time * TAU).sin() * edge * 0.18;
+        let sample = (frequency * time * TAU).sin() * edge * 0.18;
         bytes.extend_from_slice(&((sample * i16::MAX as f32) as i16).to_le_bytes());
     }
 

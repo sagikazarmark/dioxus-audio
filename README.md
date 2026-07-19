@@ -118,6 +118,12 @@ fn Player() -> Element {
 The player creates and revokes browser object URLs as its source changes.
 Playback rate changes do not reload the source or reset its position.
 
+For custom controls, `use_audio_player` exposes a `PlaybackSnapshot` through
+`controller.snapshot()`. Source lifecycle, transport, readiness, and recoverable
+play failure are independent facets: a play request remains `PlayPending` until
+the browser confirms `Playing`, and an interaction-required rejection leaves the
+current source usable for retry.
+
 ## Platform Support
 
 Browser recording, playback, and device hooks require the

@@ -23,6 +23,75 @@ pub enum PlaybackStatus {
     Failed(AudioError),
 }
 
+/// The lifecycle of the current Playback Source, independent of transport.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackSourceLifecycle {
+    Empty,
+    Loading,
+    Playable,
+    Failed(AudioError),
+}
+
+/// The requested or confirmed transport state of Playback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackTransport {
+    Idle,
+    PlayPending,
+    Playing,
+    Paused,
+    Ended,
+}
+
+/// How ready the current source is to advance Playback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackReadiness {
+    Unavailable,
+    LoadingMetadata,
+    Metadata,
+    Playable,
+    Waiting,
+}
+
+/// A play request failure that leaves the current source usable for retry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackPlayFailure {
+    InteractionRequired(AudioError),
+    Unknown(AudioError),
+}
+
+impl PlaybackPlayFailure {
+    pub fn error(&self) -> &AudioError {
+        match self {
+            Self::InteractionRequired(error) | Self::Unknown(error) => error,
+        }
+    }
+}
+
+/// One coherent observation of Playback's independent state facets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PlaybackSnapshot {
+    pub source: PlaybackSourceLifecycle,
+    pub transport: PlaybackTransport,
+    pub readiness: PlaybackReadiness,
+    pub play_failure: Option<PlaybackPlayFailure>,
+}
+
+impl Default for PlaybackSnapshot {
+    fn default() -> Self {
+        Self {
+            source: PlaybackSourceLifecycle::Empty,
+            transport: PlaybackTransport::Idle,
+            readiness: PlaybackReadiness::Unavailable,
+            play_failure: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaybackCommandError(&'static str);
 
@@ -37,12 +106,14 @@ impl std::error::Error for PlaybackCommandError {}
 #[derive(Debug)]
 pub struct PlaybackLifecycle {
     status: PlaybackStatus,
+    snapshot: PlaybackSnapshot,
 }
 
 impl Default for PlaybackLifecycle {
     fn default() -> Self {
         Self {
             status: PlaybackStatus::Empty,
+            snapshot: PlaybackSnapshot::default(),
         }
     }
 }
@@ -52,19 +123,53 @@ impl PlaybackLifecycle {
         &self.status
     }
 
+    pub fn snapshot(&self) -> &PlaybackSnapshot {
+        &self.snapshot
+    }
+
+    pub fn source(&self) -> &PlaybackSourceLifecycle {
+        &self.snapshot.source
+    }
+
+    pub fn transport(&self) -> PlaybackTransport {
+        self.snapshot.transport
+    }
+
+    pub fn readiness(&self) -> PlaybackReadiness {
+        self.snapshot.readiness
+    }
+
+    pub fn play_failure(&self) -> Option<&PlaybackPlayFailure> {
+        self.snapshot.play_failure.as_ref()
+    }
+
     pub fn loading(&mut self) {
         self.status = PlaybackStatus::Loading;
+        self.snapshot = PlaybackSnapshot {
+            source: PlaybackSourceLifecycle::Loading,
+            transport: PlaybackTransport::Idle,
+            readiness: PlaybackReadiness::LoadingMetadata,
+            play_failure: None,
+        };
     }
 
     pub fn loaded(&mut self) {
         self.status = PlaybackStatus::Ready;
+        self.snapshot.source = PlaybackSourceLifecycle::Playable;
+        self.snapshot.readiness = PlaybackReadiness::Metadata;
     }
 
-    pub fn request_play(&self) -> Result<(), PlaybackCommandError> {
-        if matches!(
-            self.status,
-            PlaybackStatus::Ready | PlaybackStatus::Paused | PlaybackStatus::Ended
-        ) {
+    pub fn request_play(&mut self) -> Result<(), PlaybackCommandError> {
+        if matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable)
+            && matches!(
+                self.snapshot.transport,
+                PlaybackTransport::Idle | PlaybackTransport::Paused | PlaybackTransport::Ended
+            )
+        {
+            if self.snapshot.play_failure.take().is_some() {
+                self.status = PlaybackStatus::Ready;
+            }
+            self.snapshot.transport = PlaybackTransport::PlayPending;
             Ok(())
         } else {
             Err(PlaybackCommandError("audio is not ready to play"))
@@ -72,17 +177,71 @@ impl PlaybackLifecycle {
     }
 
     pub fn playing(&mut self) {
+        if !matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable)
+            || !matches!(
+                self.snapshot.transport,
+                PlaybackTransport::PlayPending | PlaybackTransport::Playing
+            )
+        {
+            return;
+        }
         self.status = PlaybackStatus::Playing;
+        self.snapshot.transport = PlaybackTransport::Playing;
+        self.snapshot.readiness = PlaybackReadiness::Playable;
+        self.snapshot.play_failure = None;
+    }
+
+    pub fn waiting(&mut self) {
+        if matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable)
+            && matches!(
+                self.snapshot.transport,
+                PlaybackTransport::PlayPending | PlaybackTransport::Playing
+            )
+        {
+            self.snapshot.readiness = PlaybackReadiness::Waiting;
+        }
+    }
+
+    pub fn playable(&mut self) {
+        if matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable) {
+            self.snapshot.readiness = PlaybackReadiness::Playable;
+        }
     }
 
     pub fn paused(&mut self) {
+        if matches!(
+            self.snapshot.transport,
+            PlaybackTransport::PlayPending | PlaybackTransport::Playing
+        ) {
+            self.snapshot.transport = PlaybackTransport::Paused;
+        }
         if matches!(self.status, PlaybackStatus::Playing) {
             self.status = PlaybackStatus::Paused;
         }
     }
 
     pub fn ended(&mut self) {
+        if self.snapshot.transport != PlaybackTransport::Playing {
+            return;
+        }
         self.status = PlaybackStatus::Ended;
+        self.snapshot.transport = PlaybackTransport::Ended;
+        self.snapshot.readiness = PlaybackReadiness::Playable;
+    }
+
+    pub fn play_rejected(&mut self, failure: PlaybackPlayFailure) {
+        if !matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable)
+            || !matches!(self.snapshot.transport, PlaybackTransport::PlayPending)
+        {
+            return;
+        }
+
+        self.status = PlaybackStatus::Failed(failure.error().clone());
+        self.snapshot.transport = PlaybackTransport::Paused;
+        if self.snapshot.readiness == PlaybackReadiness::Waiting {
+            self.snapshot.readiness = PlaybackReadiness::Metadata;
+        }
+        self.snapshot.play_failure = Some(failure);
     }
 
     pub fn seeked(&mut self, position: f64, duration: f64) {
@@ -94,17 +253,26 @@ impl PlaybackLifecycle {
         }
         if duration.is_finite() && duration > 0.0 && position >= duration {
             self.status = PlaybackStatus::Ended;
+            self.snapshot.transport = PlaybackTransport::Ended;
         } else if matches!(self.status, PlaybackStatus::Ended) {
             self.status = PlaybackStatus::Paused;
+            self.snapshot.transport = PlaybackTransport::Paused;
         }
     }
 
     pub fn failed(&mut self, error: AudioError) {
-        self.status = PlaybackStatus::Failed(error);
+        self.status = PlaybackStatus::Failed(error.clone());
+        self.snapshot = PlaybackSnapshot {
+            source: PlaybackSourceLifecycle::Failed(error),
+            transport: PlaybackTransport::Idle,
+            readiness: PlaybackReadiness::Unavailable,
+            play_failure: None,
+        };
     }
 
     pub fn unload(&mut self) {
         self.status = PlaybackStatus::Empty;
+        self.snapshot = PlaybackSnapshot::default();
     }
 }
 
@@ -119,6 +287,7 @@ pub fn clamp_seek(position: f64, duration: f64) -> f64 {
 #[derive(Clone, Copy, PartialEq)]
 pub struct AudioPlayerController {
     status: ReadSignal<PlaybackStatus>,
+    snapshot: ReadSignal<PlaybackSnapshot>,
     position: ReadSignal<Duration>,
     duration: ReadSignal<Duration>,
     rate: ReadSignal<f64>,
@@ -132,6 +301,10 @@ pub struct AudioPlayerController {
 impl AudioPlayerController {
     pub fn status(self) -> ReadSignal<PlaybackStatus> {
         self.status
+    }
+
+    pub fn snapshot(self) -> ReadSignal<PlaybackSnapshot> {
+        self.snapshot
     }
 
     pub fn position(self) -> ReadSignal<Duration> {
@@ -186,13 +359,21 @@ pub fn use_audio_player(
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerController {
     let mut status = use_signal(|| PlaybackStatus::Empty);
+    let mut snapshot = use_signal(PlaybackSnapshot::default);
     let position = use_signal(|| Duration::ZERO);
     let mut duration = use_signal(|| initial_duration);
     let rate = use_signal(|| 1.0);
     let initial_duration = use_memo(use_reactive!(|(initial_duration,)| initial_duration));
     use_effect(move || {
         duration.set(initial_duration());
-        status.set(PlaybackStatus::Failed(AudioError::unsupported()));
+        let error = AudioError::unsupported();
+        status.set(PlaybackStatus::Failed(error.clone()));
+        snapshot.set(PlaybackSnapshot {
+            source: PlaybackSourceLifecycle::Failed(error),
+            transport: PlaybackTransport::Idle,
+            readiness: PlaybackReadiness::Unavailable,
+            play_failure: None,
+        });
     });
     let unsupported: Callback<(), Result<(), PlaybackCommandError>> =
         use_callback(|()| Err(PlaybackCommandError("audio playback is unsupported")));
@@ -202,6 +383,7 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
         use_callback(|_: f64| Err(PlaybackCommandError("audio playback is unsupported")));
     AudioPlayerController {
         status: status.into(),
+        snapshot: snapshot.into(),
         position: position.into(),
         duration: duration.into(),
         rate: rate.into(),

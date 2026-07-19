@@ -12,11 +12,14 @@ use web_sys::{HtmlAudioElement, Url};
 use super::*;
 use crate::{AudioError, AudioErrorKind};
 
+const HAVE_FUTURE_DATA: u16 = 3;
+
 pub(super) fn use_web_audio_player(
     source: ReadSignal<Option<AudioData>>,
     initial_duration: Duration,
 ) -> AudioPlayerController {
-    let mut status = use_signal(|| PlaybackStatus::Empty);
+    let status = use_signal(|| PlaybackStatus::Empty);
+    let snapshot = use_signal(PlaybackSnapshot::default);
     let mut position = use_signal(|| Duration::ZERO);
     let mut duration = use_signal(|| initial_duration);
     let mut rate = use_signal(|| 1.0_f64);
@@ -38,6 +41,7 @@ pub(super) fn use_web_audio_player(
             runtime_mut.generation = runtime_mut.generation.wrapping_add(1);
             runtime_mut.play_generation = runtime_mut.play_generation.wrapping_add(1);
             runtime_mut.resource.take();
+            let generation = runtime_mut.generation;
             drop(runtime_mut);
             position.set(Duration::ZERO);
             duration.set(*initial_duration.peek());
@@ -45,15 +49,17 @@ pub(super) fn use_web_audio_player(
             let source = source.read();
             let Some(source) = source.as_ref() else {
                 runtime.borrow_mut().lifecycle.unload();
-                status.set(PlaybackStatus::Empty);
+                publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
                 return;
             };
             runtime.borrow_mut().lifecycle.loading();
-            status.set(PlaybackStatus::Loading);
+            publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
             match WebPlayer::new(
                 source,
                 Rc::downgrade(&runtime),
+                generation,
                 status,
+                snapshot,
                 position,
                 duration,
                 dioxus_runtime.clone(),
@@ -65,7 +71,7 @@ pub(super) fn use_web_audio_player(
                 }
                 Err(error) => {
                     runtime.borrow_mut().lifecycle.failed(error.clone());
-                    status.set(PlaybackStatus::Failed(error));
+                    publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
                 }
             }
         });
@@ -92,14 +98,9 @@ pub(super) fn use_web_audio_player(
 
     let runtime_for_play = runtime.clone();
     let play: Callback<(), Result<(), PlaybackCommandError>> = use_callback(move |()| {
-        let (element, generation, play_generation) = {
+        let (element, generation, play_generation, restart_ended) = {
             let mut runtime = runtime_for_play.borrow_mut();
-            if matches!(runtime.lifecycle.status(), PlaybackStatus::Failed(_))
-                && runtime.resource.is_some()
-            {
-                runtime.lifecycle.loaded();
-                status.set(PlaybackStatus::Ready);
-            }
+            let restart_ended = matches!(runtime.lifecycle.status(), PlaybackStatus::Ended);
             runtime.lifecycle.request_play()?;
             runtime.play_generation = runtime.play_generation.wrapping_add(1);
             (
@@ -110,37 +111,45 @@ pub(super) fn use_web_audio_player(
                     .ok_or(PlaybackCommandError("audio is not loaded"))?,
                 runtime.generation,
                 runtime.play_generation,
+                restart_ended,
             )
         };
-        if matches!(
-            runtime_for_play.borrow().lifecycle.status(),
-            PlaybackStatus::Ended
-        ) {
+        publish_lifecycle(&runtime_for_play.borrow().lifecycle, status, snapshot);
+        if restart_ended {
             element.set_current_time(0.0);
             position.set(Duration::ZERO);
         }
-        let promise = element
-            .play()
-            .map_err(|_| PlaybackCommandError("browser rejected playback"))?;
+        let promise = match element.play() {
+            Ok(promise) => promise,
+            Err(value) => {
+                let failure = play_failure(value);
+                runtime_for_play
+                    .borrow_mut()
+                    .lifecycle
+                    .play_rejected(failure);
+                publish_lifecycle(&runtime_for_play.borrow().lifecycle, status, snapshot);
+                return Err(PlaybackCommandError("browser rejected playback"));
+            }
+        };
         let runtime = runtime_for_play.clone();
         spawn(async move {
-            if let Err(value) = wasm_bindgen_futures::JsFuture::from(promise).await {
-                let runtime_ref = runtime.borrow();
-                if runtime_ref.generation != generation
-                    || runtime_ref.play_generation != play_generation
-                {
-                    return;
-                }
-                drop(runtime_ref);
-                let error = AudioError::new(
-                    AudioErrorKind::PlaybackFailure,
-                    value
-                        .as_string()
-                        .unwrap_or_else(|| "browser rejected playback".to_string()),
-                );
-                runtime.borrow_mut().lifecycle.failed(error.clone());
-                status.set(PlaybackStatus::Failed(error));
+            let outcome = wasm_bindgen_futures::JsFuture::from(promise).await;
+            let runtime_ref = runtime.borrow();
+            if !runtime_ref.owner_active
+                || runtime_ref.generation != generation
+                || runtime_ref.play_generation != play_generation
+            {
+                return;
             }
+            drop(runtime_ref);
+            match outcome {
+                Ok(_) => runtime.borrow_mut().lifecycle.playing(),
+                Err(value) => {
+                    let failure = play_failure(value);
+                    runtime.borrow_mut().lifecycle.play_rejected(failure);
+                }
+            }
+            publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
         });
         Ok(())
     });
@@ -157,7 +166,10 @@ pub(super) fn use_web_audio_player(
         drop(runtime);
         element
             .pause()
-            .map_err(|_| PlaybackCommandError("browser rejected pause"))
+            .map_err(|_| PlaybackCommandError("browser rejected pause"))?;
+        runtime_for_pause.borrow_mut().lifecycle.paused();
+        publish_lifecycle(&runtime_for_pause.borrow().lifecycle, status, snapshot);
+        Ok(())
     });
 
     let runtime_for_seek = runtime.clone();
@@ -169,7 +181,7 @@ pub(super) fn use_web_audio_player(
             resource.element.set_current_time(seconds);
             position.set(Duration::from_secs_f64(seconds));
             runtime.lifecycle.seeked(seconds, duration_secs);
-            status.set(runtime.lifecycle.status().clone());
+            publish_lifecycle(&runtime.lifecycle, status, snapshot);
         }
     });
 
@@ -182,7 +194,7 @@ pub(super) fn use_web_audio_player(
             resource.element.set_current_time(seconds);
             position.set(Duration::from_secs_f64(seconds));
             runtime.lifecycle.seeked(seconds, duration_secs);
-            status.set(runtime.lifecycle.status().clone());
+            publish_lifecycle(&runtime.lifecycle, status, snapshot);
         }
     });
 
@@ -201,6 +213,7 @@ pub(super) fn use_web_audio_player(
 
     AudioPlayerController {
         status: status.into(),
+        snapshot: snapshot.into(),
         position: position.into(),
         duration: duration.into(),
         rate: rate.into(),
@@ -212,12 +225,48 @@ pub(super) fn use_web_audio_player(
     }
 }
 
-#[derive(Default)]
 struct PlayerRuntime {
     lifecycle: PlaybackLifecycle,
     resource: Option<WebPlayer>,
     generation: u64,
     play_generation: u64,
+    owner_active: bool,
+}
+
+impl Default for PlayerRuntime {
+    fn default() -> Self {
+        Self {
+            lifecycle: PlaybackLifecycle::default(),
+            resource: None,
+            generation: 0,
+            play_generation: 0,
+            owner_active: true,
+        }
+    }
+}
+
+fn publish_lifecycle(
+    lifecycle: &PlaybackLifecycle,
+    mut status: Signal<PlaybackStatus>,
+    mut snapshot: Signal<PlaybackSnapshot>,
+) {
+    status.set(lifecycle.status().clone());
+    snapshot.set(lifecycle.snapshot().clone());
+}
+
+fn with_current_runtime(
+    runtime: &Weak<RefCell<PlayerRuntime>>,
+    generation: u64,
+    update: impl FnOnce(&mut PlayerRuntime),
+) {
+    let Some(runtime) = runtime.upgrade() else {
+        return;
+    };
+    let mut runtime = runtime.borrow_mut();
+    if !runtime.owner_active || runtime.generation != generation {
+        return;
+    }
+    update(&mut runtime);
 }
 
 struct UnmountGuard(Weak<RefCell<PlayerRuntime>>);
@@ -225,7 +274,14 @@ struct UnmountGuard(Weak<RefCell<PlayerRuntime>>);
 impl Drop for UnmountGuard {
     fn drop(&mut self) {
         if let Some(runtime) = self.0.upgrade() {
-            runtime.borrow_mut().resource.take();
+            let resource = {
+                let mut runtime = runtime.borrow_mut();
+                runtime.owner_active = false;
+                runtime.generation = runtime.generation.wrapping_add(1);
+                runtime.play_generation = runtime.play_generation.wrapping_add(1);
+                runtime.resource.take()
+            };
+            drop(resource);
         }
     }
 }
@@ -234,8 +290,10 @@ struct WebPlayer {
     element: HtmlAudioElement,
     _object_url: ObjectUrl,
     on_loaded: Closure<dyn FnMut()>,
+    on_can_play: Closure<dyn FnMut()>,
     on_time: Closure<dyn FnMut()>,
     on_playing: Closure<dyn FnMut()>,
+    on_waiting: Closure<dyn FnMut()>,
     on_pause: Closure<dyn FnMut()>,
     on_ended: Closure<dyn FnMut()>,
     on_error: Closure<dyn FnMut()>,
@@ -245,7 +303,9 @@ impl WebPlayer {
     fn new(
         source: &AudioData,
         runtime: Weak<RefCell<PlayerRuntime>>,
-        mut status: Signal<PlaybackStatus>,
+        generation: u64,
+        status: Signal<PlaybackStatus>,
+        snapshot: Signal<PlaybackSnapshot>,
         mut position: Signal<Duration>,
         mut duration: Signal<Duration>,
         dioxus_runtime: Rc<DioxusRuntime>,
@@ -270,61 +330,108 @@ impl WebPlayer {
         let on_loaded = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_loaded.in_scope(dioxus_scope, || {
                 let value = element_for_loaded.duration();
-                if value.is_finite() && value > 0.0 {
-                    duration.set(Duration::from_secs_f64(value));
-                }
-                if let Some(runtime) = runtime_for_loaded.upgrade() {
-                    runtime.borrow_mut().lifecycle.loaded();
-                    status.set(PlaybackStatus::Ready);
-                }
+                with_current_runtime(&runtime_for_loaded, generation, |runtime| {
+                    if value.is_finite() && value > 0.0 {
+                        duration.set(Duration::from_secs_f64(value));
+                    }
+                    runtime.lifecycle.loaded();
+                    publish_lifecycle(&runtime.lifecycle, status, snapshot);
+                });
             });
         }) as Box<dyn FnMut()>);
         add_listener(&element, "loadedmetadata", &on_loaded)?;
 
+        let runtime_for_can_play = runtime.clone();
+        let dioxus_runtime_for_can_play = dioxus_runtime.clone();
+        let on_can_play = Closure::wrap(Box::new(move || {
+            dioxus_runtime_for_can_play.in_scope(dioxus_scope, || {
+                with_current_runtime(&runtime_for_can_play, generation, |runtime| {
+                    runtime.lifecycle.playable();
+                    publish_lifecycle(&runtime.lifecycle, status, snapshot);
+                });
+            });
+        }) as Box<dyn FnMut()>);
+        add_listener(&element, "canplay", &on_can_play)?;
+
         let element_for_time = element.clone();
+        let runtime_for_time = runtime.clone();
         let dioxus_runtime_for_time = dioxus_runtime.clone();
         let on_time = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_time.in_scope(dioxus_scope, || {
                 let value = element_for_time.current_time();
-                if value.is_finite() && value >= 0.0 {
-                    position.set(Duration::from_secs_f64(value));
-                }
+                with_current_runtime(&runtime_for_time, generation, |_| {
+                    if value.is_finite() && value >= 0.0 {
+                        position.set(Duration::from_secs_f64(value));
+                    }
+                });
             });
         }) as Box<dyn FnMut()>);
         add_listener(&element, "timeupdate", &on_time)?;
 
+        let element_for_playing = element.clone();
         let runtime_for_playing = runtime.clone();
         let dioxus_runtime_for_playing = dioxus_runtime.clone();
         let on_playing = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_playing.in_scope(dioxus_scope, || {
-                if let Some(runtime) = runtime_for_playing.upgrade() {
-                    runtime.borrow_mut().lifecycle.playing();
-                    status.set(PlaybackStatus::Playing);
-                }
+                with_current_runtime(&runtime_for_playing, generation, |runtime| {
+                    if runtime.lifecycle.transport() == PlaybackTransport::Playing
+                        && !element_for_playing.paused()
+                        && !element_for_playing.ended()
+                    {
+                        runtime.lifecycle.playable();
+                        publish_lifecycle(&runtime.lifecycle, status, snapshot);
+                    }
+                });
             });
         }) as Box<dyn FnMut()>);
         add_listener(&element, "playing", &on_playing)?;
 
+        let element_for_waiting = element.clone();
+        let runtime_for_waiting = runtime.clone();
+        let dioxus_runtime_for_waiting = dioxus_runtime.clone();
+        let on_waiting = Closure::wrap(Box::new(move || {
+            dioxus_runtime_for_waiting.in_scope(dioxus_scope, || {
+                with_current_runtime(&runtime_for_waiting, generation, |runtime| {
+                    if !element_for_waiting.paused()
+                        && !element_for_waiting.ended()
+                        && element_for_waiting.ready_state() < HAVE_FUTURE_DATA
+                    {
+                        runtime.lifecycle.waiting();
+                        publish_lifecycle(&runtime.lifecycle, status, snapshot);
+                    }
+                });
+            });
+        }) as Box<dyn FnMut()>);
+        add_listener(&element, "waiting", &on_waiting)?;
+
+        let element_for_pause = element.clone();
         let runtime_for_pause = runtime.clone();
         let dioxus_runtime_for_pause = dioxus_runtime.clone();
         let on_pause = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_pause.in_scope(dioxus_scope, || {
-                if let Some(runtime) = runtime_for_pause.upgrade() {
-                    runtime.borrow_mut().lifecycle.paused();
-                    status.set(runtime.borrow().lifecycle.status().clone());
-                }
+                with_current_runtime(&runtime_for_pause, generation, |runtime| {
+                    if element_for_pause.paused()
+                        && runtime.lifecycle.transport() == PlaybackTransport::Playing
+                    {
+                        runtime.lifecycle.paused();
+                        publish_lifecycle(&runtime.lifecycle, status, snapshot);
+                    }
+                });
             });
         }) as Box<dyn FnMut()>);
         add_listener(&element, "pause", &on_pause)?;
 
+        let element_for_ended = element.clone();
         let runtime_for_ended = runtime.clone();
         let dioxus_runtime_for_ended = dioxus_runtime.clone();
         let on_ended = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_ended.in_scope(dioxus_scope, || {
-                if let Some(runtime) = runtime_for_ended.upgrade() {
-                    runtime.borrow_mut().lifecycle.ended();
-                    status.set(PlaybackStatus::Ended);
-                }
+                with_current_runtime(&runtime_for_ended, generation, |runtime| {
+                    if element_for_ended.ended() {
+                        runtime.lifecycle.ended();
+                        publish_lifecycle(&runtime.lifecycle, status, snapshot);
+                    }
+                });
             });
         }) as Box<dyn FnMut()>);
         add_listener(&element, "ended", &on_ended)?;
@@ -332,14 +439,14 @@ impl WebPlayer {
         let runtime_for_error = runtime;
         let on_error = Closure::wrap(Box::new(move || {
             dioxus_runtime.in_scope(dioxus_scope, || {
-                if let Some(runtime) = runtime_for_error.upgrade() {
+                with_current_runtime(&runtime_for_error, generation, |runtime| {
                     let error = AudioError::new(
                         AudioErrorKind::PlaybackFailure,
                         "browser could not decode or play this audio",
                     );
-                    runtime.borrow_mut().lifecycle.failed(error.clone());
-                    status.set(PlaybackStatus::Failed(error));
-                }
+                    runtime.lifecycle.failed(error);
+                    publish_lifecycle(&runtime.lifecycle, status, snapshot);
+                });
             });
         }) as Box<dyn FnMut()>);
         add_listener(&element, "error", &on_error)?;
@@ -348,8 +455,10 @@ impl WebPlayer {
             element,
             _object_url: object_url,
             on_loaded,
+            on_can_play,
             on_time,
             on_playing,
+            on_waiting,
             on_pause,
             on_ended,
             on_error,
@@ -359,13 +468,15 @@ impl WebPlayer {
 
 impl Drop for WebPlayer {
     fn drop(&mut self) {
-        let _ = self.element.pause();
         remove_listener(&self.element, "loadedmetadata", &self.on_loaded);
+        remove_listener(&self.element, "canplay", &self.on_can_play);
         remove_listener(&self.element, "timeupdate", &self.on_time);
         remove_listener(&self.element, "playing", &self.on_playing);
+        remove_listener(&self.element, "waiting", &self.on_waiting);
         remove_listener(&self.element, "pause", &self.on_pause);
         remove_listener(&self.element, "ended", &self.on_ended);
         remove_listener(&self.element, "error", &self.on_error);
+        let _ = self.element.pause();
         self.element.set_src("");
     }
 }
@@ -399,4 +510,22 @@ fn playback_error(value: JsValue) -> AudioError {
             .as_string()
             .unwrap_or_else(|| "browser audio playback operation failed".to_string()),
     )
+}
+
+fn play_failure(value: JsValue) -> PlaybackPlayFailure {
+    let interaction_required = value
+        .dyn_ref::<web_sys::DomException>()
+        .is_some_and(|error| error.name() == "NotAllowedError");
+    let error = AudioError::new(
+        AudioErrorKind::PlaybackFailure,
+        value
+            .as_string()
+            .unwrap_or_else(|| "browser rejected playback".to_string()),
+    );
+
+    if interaction_required {
+        PlaybackPlayFailure::InteractionRequired(error)
+    } else {
+        PlaybackPlayFailure::Unknown(error)
+    }
 }

@@ -93,6 +93,10 @@ fn player_controls_have_explicit_accessible_names() {
     assert!(html.contains("aria-label=\"Play\""));
     assert!(html.contains("aria-label=\"Skip back 15 seconds\""));
     assert!(html.contains("aria-label=\"Playback speed: 1x\""));
+    assert!(html.contains("data-source=\"empty\""));
+    assert!(html.contains("data-transport=\"idle\""));
+    assert!(html.contains("data-readiness=\"unavailable\""));
+    assert!(html.contains("data-play-failure=\"none\""));
 }
 
 #[test]

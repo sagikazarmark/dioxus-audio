@@ -5,7 +5,10 @@ use dioxus_icons::lucide::{Pause, Play, RotateCcw, RotateCw};
 
 use super::AudioScrubber;
 use crate::AudioData;
-use crate::playback::{PlaybackStatus, use_audio_player};
+use crate::playback::{
+    PlaybackPlayFailure, PlaybackReadiness, PlaybackSourceLifecycle, PlaybackStatus,
+    PlaybackTransport, use_audio_player,
+};
 
 const PLAYBACK_RATES: [f64; 3] = [1.0, 1.5, 2.0];
 
@@ -22,6 +25,7 @@ pub fn AudioPlayer(
         Duration::from_secs_f64(finite_non_negative(duration_secs)),
     );
     let status = controller.status()();
+    let snapshot = controller.snapshot()();
     let position = controller.position()().as_secs_f64();
     let duration = controller.duration()().as_secs_f64();
     let rate = controller.rate()();
@@ -44,6 +48,10 @@ pub fn AudioPlayer(
         div {
             class: "dioxus-audio dioxus-audio__player",
             "data-state": playback_state_name(&status),
+            "data-source": source_lifecycle_name(&snapshot.source),
+            "data-transport": transport_state_name(snapshot.transport),
+            "data-readiness": readiness_state_name(snapshot.readiness),
+            "data-play-failure": play_failure_name(snapshot.play_failure.as_ref()),
             AudioScrubber {
                 position_secs: position,
                 duration_secs: duration,
@@ -139,5 +147,42 @@ fn playback_state_name(status: &PlaybackStatus) -> &'static str {
         PlaybackStatus::Paused => "paused",
         PlaybackStatus::Ended => "ended",
         PlaybackStatus::Failed(_) => "error",
+    }
+}
+
+fn source_lifecycle_name(source: &PlaybackSourceLifecycle) -> &'static str {
+    match source {
+        PlaybackSourceLifecycle::Empty => "empty",
+        PlaybackSourceLifecycle::Loading => "loading",
+        PlaybackSourceLifecycle::Playable => "playable",
+        PlaybackSourceLifecycle::Failed(_) => "failed",
+    }
+}
+
+fn transport_state_name(transport: PlaybackTransport) -> &'static str {
+    match transport {
+        PlaybackTransport::Idle => "idle",
+        PlaybackTransport::PlayPending => "play-pending",
+        PlaybackTransport::Playing => "playing",
+        PlaybackTransport::Paused => "paused",
+        PlaybackTransport::Ended => "ended",
+    }
+}
+
+fn readiness_state_name(readiness: PlaybackReadiness) -> &'static str {
+    match readiness {
+        PlaybackReadiness::Unavailable => "unavailable",
+        PlaybackReadiness::LoadingMetadata => "loading-metadata",
+        PlaybackReadiness::Metadata => "metadata",
+        PlaybackReadiness::Playable => "playable",
+        PlaybackReadiness::Waiting => "waiting",
+    }
+}
+
+fn play_failure_name(failure: Option<&PlaybackPlayFailure>) -> &'static str {
+    match failure {
+        None => "none",
+        Some(PlaybackPlayFailure::InteractionRequired(_)) => "interaction-required",
+        Some(PlaybackPlayFailure::Unknown(_)) => "unknown",
     }
 }

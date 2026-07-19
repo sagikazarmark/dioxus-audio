@@ -6,7 +6,10 @@ use dioxus_audio::components::{
     SpectrumVisualizer, WaveformPreview,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
-use dioxus_audio::recorder::{RecorderOptions, RecorderStatus, use_audio_recorder};
+use dioxus_audio::recorder::{
+    RecorderOptions, RecorderStatus, RecordingConstraint, RecordingConstraints,
+    is_recorder_mime_type_supported, use_audio_recorder,
+};
 use dioxus_audio::{AudioData, RecordedAudio};
 
 use crate::components::StatusChip;
@@ -15,7 +18,24 @@ use crate::components::StatusChip;
 #[component]
 pub fn RecorderExample() -> Element {
     let devices = use_audio_input_devices();
-    let recorder = use_audio_recorder(RecorderOptions::default(), devices.selected().into());
+    let mut next_sample_rate = use_signal(|| 48_000_u32);
+    let mut require_impossible_rate = use_signal(|| false);
+    let mut mime_supported = use_signal(|| None::<bool>);
+    let sample_rate = if require_impossible_rate() {
+        RecordingConstraint::Exact(1)
+    } else {
+        RecordingConstraint::Ideal(next_sample_rate())
+    };
+    let mut options = RecorderOptions::default();
+    options.constraints = RecordingConstraints {
+        channel_count: Some(RecordingConstraint::Ideal(1)),
+        sample_rate: Some(sample_rate),
+        echo_cancellation: Some(RecordingConstraint::Ideal(false)),
+        noise_suppression: Some(RecordingConstraint::Ideal(false)),
+        latency: Some(RecordingConstraint::Ideal(std::time::Duration::from_millis(20))),
+    };
+    options.mime_types.clear();
+    let recorder = use_audio_recorder(options, devices.selected().into());
     let custom_recorder = use_audio_recorder(RecorderOptions::default(), devices.selected().into());
     let mut completed = use_signal(|| None::<RecordedAudio>);
     let mut source = use_signal(|| None::<AudioData>);
@@ -28,13 +48,33 @@ pub fn RecorderExample() -> Element {
             completed.set(Some(recording));
         }
     });
+    use_effect(move || {
+        mime_supported.set(Some(is_recorder_mime_type_supported(
+            "audio/webm;codecs=opus",
+        )));
+    });
 
     let status = recorder.status()();
     let custom_status = custom_recorder.status()();
     let active = recorder_active(&status) || recorder_active(&custom_status);
     let permission = devices.permission()();
     let recording = completed.read().clone();
+    let requested_constraints = recorder.requested_constraints()();
+    let capabilities = recorder.constraint_capabilities()();
+    let settings = recorder.settings()();
+    let selected_media_type = recorder.media_type()();
+    let mime_support = mime_supported().map(|supported| {
+        if supported {
+            "supported"
+        } else {
+            "unsupported"
+        }
+    });
     let elapsed = format_duration(recorder.elapsed()().as_secs_f64());
+    let rejected_constraint = match &status {
+        RecorderStatus::Failed(error) => error.overconstrained_constraint().map(str::to_string),
+        _ => None,
+    };
     let custom_labels = RecorderAnnouncementLabels {
         idle: "Custom recorder idle".to_string(),
         requesting: "Custom recorder requesting microphone access".to_string(),
@@ -55,6 +95,63 @@ pub fn RecorderExample() -> Element {
             }
 
             AudioInputSelector { devices, disabled: active }
+
+            div {
+                class: "grid gap-3 rounded-2xl border border-base-300 bg-base-100 p-4 text-sm",
+                aria_label: "Recorder configuration",
+                div { class: "flex flex-wrap gap-2",
+                    button {
+                        class: "btn btn-sm btn-outline",
+                        r#type: "button",
+                        onclick: move |_| next_sample_rate.set(44_100),
+                        "Use 44100 Hz for future recordings"
+                    }
+                    button {
+                        class: "btn btn-sm btn-outline",
+                        r#type: "button",
+                        disabled: active,
+                        onclick: move |_| require_impossible_rate.set(true),
+                        "Require impossible sample rate"
+                    }
+                }
+                p {
+                    if let Some(constraints) = requested_constraints {
+                        if let Some(sample_rate) = constraints.sample_rate {
+                            "Requested sample rate: {format_sample_rate_constraint(&sample_rate)}"
+                        } else {
+                            "Requested sample rate: none"
+                        }
+                    } else {
+                        "Requested sample rate: not started"
+                    }
+                }
+                if let Some(capabilities) = capabilities {
+                    p { "Sample rate: {recognition(capabilities.sample_rate)}" }
+                    p { "Noise suppression: {recognition(capabilities.noise_suppression)}" }
+                } else {
+                    p { "Recorder capabilities: unknown" }
+                }
+                p {
+                    if let Some(sample_rate) = settings.and_then(|settings| settings.sample_rate) {
+                        "Effective sample rate: {sample_rate} Hz"
+                    } else {
+                        "Effective sample rate: unknown"
+                    }
+                }
+                p {
+                    if let Some(media_type) = selected_media_type {
+                        "Selected media type: {media_type}"
+                    } else {
+                        "Selected media type: unknown"
+                    }
+                }
+                if let Some(mime_support) = mime_support {
+                    p { "Opus WebM MIME probe: {mime_support}" }
+                }
+                if let Some(constraint) = rejected_constraint {
+                    p { role: "alert", "Rejected exact constraint: {constraint}" }
+                }
+            }
 
             if permission != MicrophonePermission::Granted && !active {
                 button {
@@ -183,4 +280,19 @@ fn recorder_active(status: &RecorderStatus) -> bool {
             | RecorderStatus::Paused
             | RecorderStatus::Stopping
     )
+}
+
+fn format_sample_rate_constraint(constraint: &RecordingConstraint<u32>) -> String {
+    match constraint {
+        RecordingConstraint::Ideal(value) => format!("ideal {value} Hz"),
+        RecordingConstraint::Exact(value) => format!("exact {value} Hz"),
+    }
+}
+
+fn recognition(recognized: bool) -> &'static str {
+    if recognized {
+        "recognized"
+    } else {
+        "unrecognized"
+    }
 }

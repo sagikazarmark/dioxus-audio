@@ -227,12 +227,56 @@ fn command_error(message: &'static str) -> RecorderCommandError {
     RecorderCommandError { message }
 }
 
+/// A best-effort or required value requested for a Recording Source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordingConstraint<T> {
+    /// Prefer this value while allowing the browser to select another.
+    Ideal(T),
+    /// Require this value or reject source acquisition.
+    Exact(T),
+}
+
+/// Portable startup constraints applied when the Recorder acquires a source.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecordingConstraints {
+    pub channel_count: Option<RecordingConstraint<u32>>,
+    pub sample_rate: Option<RecordingConstraint<u32>>,
+    pub echo_cancellation: Option<RecordingConstraint<bool>>,
+    pub noise_suppression: Option<RecordingConstraint<bool>>,
+    pub latency: Option<RecordingConstraint<Duration>>,
+}
+
+/// Constraint fields that the browser reports recognizing.
+///
+/// Recognition does not prove that any particular value is available.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecorderConstraintCapabilities {
+    pub channel_count: bool,
+    pub sample_rate: bool,
+    pub echo_cancellation: bool,
+    pub noise_suppression: bool,
+    pub latency: bool,
+}
+
+/// Effective settings reported by an acquired Recording Source.
+///
+/// Every field is optional because browser reporting varies.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecordingSourceSettings {
+    pub channel_count: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub echo_cancellation: Option<bool>,
+    pub noise_suppression: Option<bool>,
+    pub latency: Option<Duration>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct RecorderOptions {
     pub fft_size: u32,
     pub smoothing: f64,
     pub peak_interval: Duration,
+    pub constraints: RecordingConstraints,
     pub mime_types: Vec<String>,
     pub audio_bits_per_second: Option<u32>,
 }
@@ -243,6 +287,7 @@ impl Default for RecorderOptions {
             fft_size: 256,
             smoothing: 0.8,
             peak_interval: Duration::from_millis(100),
+            constraints: RecordingConstraints::default(),
             mime_types: vec![
                 "audio/webm;codecs=opus".to_string(),
                 "audio/webm".to_string(),
@@ -292,6 +337,10 @@ pub struct AudioRecorder {
     analyser: ReadSignal<Option<AudioAnalyser>>,
     elapsed: ReadSignal<Duration>,
     microphone: ReadSignal<MicrophoneStatus>,
+    requested_constraints: ReadSignal<Option<RecordingConstraints>>,
+    constraint_capabilities: ReadSignal<Option<RecorderConstraintCapabilities>>,
+    settings: ReadSignal<Option<RecordingSourceSettings>>,
+    media_type: ReadSignal<Option<String>>,
     start: Callback<(), Result<(), RecorderCommandError>>,
     pause: Callback<(), Result<(), RecorderCommandError>>,
     resume: Callback<(), Result<(), RecorderCommandError>>,
@@ -320,6 +369,28 @@ impl AudioRecorder {
 
     pub fn microphone(self) -> ReadSignal<MicrophoneStatus> {
         self.microphone
+    }
+
+    /// Constraints snapshotted by the most recently accepted start request.
+    pub fn requested_constraints(self) -> ReadSignal<Option<RecordingConstraints>> {
+        self.requested_constraints
+    }
+
+    /// Constraint fields that the browser reports recognizing.
+    ///
+    /// Recognition does not imply that a particular value can be acquired.
+    pub fn constraint_capabilities(self) -> ReadSignal<Option<RecorderConstraintCapabilities>> {
+        self.constraint_capabilities
+    }
+
+    /// Effective settings reported by the acquired Recording Source.
+    pub fn settings(self) -> ReadSignal<Option<RecordingSourceSettings>> {
+        self.settings
+    }
+
+    /// Encoder media type selected for the current or most recent Recording.
+    pub fn media_type(self) -> ReadSignal<Option<String>> {
+        self.media_type
     }
 
     pub fn start(self) -> Result<(), RecorderCommandError> {
@@ -352,6 +423,23 @@ impl AudioRecorder {
     }
 }
 
+/// Probe whether the browser recognizes a Recorder media type.
+///
+/// A positive result does not guarantee that source acquisition, Recorder
+/// construction, or a complete Recording will succeed.
+pub fn is_recorder_mime_type_supported(mime_type: &str) -> bool {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        web_sys::MediaRecorder::is_type_supported(mime_type)
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        let _ = mime_type;
+        false
+    }
+}
+
 /// Create a recorder controller. The selected input is snapshotted by `start`.
 pub fn use_audio_recorder(
     options: RecorderOptions,
@@ -376,6 +464,10 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
     let completed = use_signal(|| None::<RecordedAudio>);
     let analyser = use_signal(|| None::<AudioAnalyser>);
     let elapsed = use_signal(|| Duration::ZERO);
+    let requested_constraints = use_signal(|| None::<RecordingConstraints>);
+    let constraint_capabilities = use_signal(|| None::<RecorderConstraintCapabilities>);
+    let settings = use_signal(|| None::<RecordingSourceSettings>);
+    let media_type = use_signal(|| None::<String>);
     let mut microphone = use_signal(|| MicrophoneStatus {
         permission: MicrophonePermission::Unknown,
         recorder: RecorderStatus::Idle,
@@ -408,6 +500,10 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
         analyser: analyser.into(),
         elapsed: elapsed.into(),
         microphone: microphone.into(),
+        requested_constraints: requested_constraints.into(),
+        constraint_capabilities: constraint_capabilities.into(),
+        settings: settings.into(),
+        media_type: media_type.into(),
         start: unsupported,
         pause: unsupported,
         resume: unsupported,

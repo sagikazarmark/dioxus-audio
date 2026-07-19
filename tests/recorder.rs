@@ -1,5 +1,6 @@
 use dioxus_audio::recorder::{
-    CompletionDisposition, RecorderLifecycle, RecorderOptions, RecorderStatus,
+    CompletionDisposition, RecorderConstraintCapabilities, RecorderLifecycle, RecorderOptions,
+    RecorderStatus, RecordingConstraint, RecordingConstraints, RecordingSourceSettings,
 };
 use dioxus_audio::{AudioError, AudioErrorKind};
 
@@ -114,4 +115,72 @@ fn recorder_options_reject_invalid_analysis_configuration() {
     let error = options.validate().unwrap_err();
     assert!(recorder.configuration_failed(error.clone()));
     assert_eq!(recorder.status(), &RecorderStatus::Failed(error));
+}
+
+#[test]
+fn recorder_constraints_express_the_portable_startup_subset() {
+    let constraints = RecordingConstraints {
+        channel_count: Some(RecordingConstraint::Exact(1)),
+        sample_rate: Some(RecordingConstraint::Ideal(48_000)),
+        echo_cancellation: Some(RecordingConstraint::Ideal(false)),
+        noise_suppression: Some(RecordingConstraint::Exact(false)),
+        latency: Some(RecordingConstraint::Ideal(
+            std::time::Duration::from_millis(20),
+        )),
+    };
+
+    let snapshot = constraints.clone();
+    let mut changed = constraints;
+    changed.sample_rate = Some(RecordingConstraint::Exact(44_100));
+
+    assert_eq!(
+        snapshot.sample_rate,
+        Some(RecordingConstraint::Ideal(48_000))
+    );
+    assert_eq!(
+        snapshot.latency,
+        Some(RecordingConstraint::Ideal(
+            std::time::Duration::from_millis(20)
+        ))
+    );
+    assert_ne!(snapshot, changed);
+}
+
+#[test]
+fn recorder_capabilities_and_effective_settings_are_distinct_values() {
+    let capabilities = RecorderConstraintCapabilities {
+        channel_count: true,
+        sample_rate: true,
+        echo_cancellation: true,
+        noise_suppression: false,
+        latency: true,
+    };
+    let settings = RecordingSourceSettings {
+        channel_count: Some(1),
+        sample_rate: Some(48_000),
+        echo_cancellation: Some(false),
+        noise_suppression: None,
+        latency: Some(std::time::Duration::from_millis(10)),
+    };
+
+    assert!(!capabilities.noise_suppression);
+    assert_eq!(settings.noise_suppression, None);
+    assert_eq!(settings.sample_rate, Some(48_000));
+}
+
+#[test]
+fn exact_constraint_failures_preserve_the_rejected_constraint() {
+    let error = AudioError::overconstrained("sampleRate", "sample rate is unavailable");
+
+    assert_eq!(error.kind(), AudioErrorKind::Overconstrained);
+    assert_eq!(error.overconstrained_constraint(), Some("sampleRate"));
+    assert_eq!(error.message(), "sample rate is unavailable");
+}
+
+#[test]
+fn overconstraint_failure_does_not_invent_missing_detail() {
+    let error = AudioError::overconstrained("", "constraints are unavailable");
+
+    assert_eq!(error.kind(), AudioErrorKind::Overconstrained);
+    assert_eq!(error.overconstrained_constraint(), None);
 }

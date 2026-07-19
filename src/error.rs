@@ -9,6 +9,7 @@ pub enum AudioErrorKind {
     PermissionDenied,
     DeviceNotFound,
     DeviceUnavailable,
+    Overconstrained,
     InvalidConfiguration,
     RecorderFailure,
     PlaybackFailure,
@@ -19,6 +20,7 @@ pub enum AudioErrorKind {
 pub struct AudioError {
     kind: AudioErrorKind,
     message: String,
+    overconstrained_constraint: Option<String>,
 }
 
 impl AudioError {
@@ -26,6 +28,19 @@ impl AudioError {
         Self {
             kind,
             message: message.into(),
+            overconstrained_constraint: None,
+        }
+    }
+
+    /// Create an exact-constraint acquisition failure.
+    ///
+    /// An empty browser constraint name is treated as unavailable detail.
+    pub fn overconstrained(constraint: impl Into<String>, message: impl Into<String>) -> Self {
+        let constraint = constraint.into();
+        Self {
+            kind: AudioErrorKind::Overconstrained,
+            message: message.into(),
+            overconstrained_constraint: (!constraint.is_empty()).then_some(constraint),
         }
     }
 
@@ -42,6 +57,11 @@ impl AudioError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Browser constraint name associated with an overconstraint failure.
+    pub fn overconstrained_constraint(&self) -> Option<&str> {
+        self.overconstrained_constraint.as_deref()
     }
 }
 

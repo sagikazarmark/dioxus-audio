@@ -100,6 +100,25 @@ Input selection is snapshotted by `recorder.start()`. Let users choose a device
 before starting capture; changing `devices.selected()` does not switch an
 active recording.
 
+`RecorderOptions::constraints` accepts portable `Ideal` or `Exact` requests for
+channel count, sample rate, echo cancellation, noise suppression, and latency.
+The Recorder snapshots those constraints when it accepts `start()`, so changing
+options during a Recording only affects a future Recording.
+
+Use `recorder.requested_constraints()` for that snapshot,
+`recorder.constraint_capabilities()` for the constraint fields the browser
+recognizes, and `recorder.settings()` for the effective settings reported by
+the acquired Recording Source. Effective fields are optional because browsers
+do not report all settings consistently. An exact-constraint failure has
+`AudioErrorKind::Overconstrained`; `overconstrained_constraint()` identifies the
+rejected browser constraint when supplied by the browser.
+
+`recorder.media_type()` exposes the selected encoder format once the Recording
+starts. `is_recorder_mime_type_supported()` can be used before starting to probe
+a candidate format, but a positive probe only means the browser recognizes the
+type. It does not guarantee source acquisition, Recorder construction, or a
+successful Recording.
+
 ## Playback
 
 ```rust

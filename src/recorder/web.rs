@@ -1,10 +1,10 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use dioxus::core::{Runtime as DioxusRuntime, ScopeId};
 use dioxus::prelude::*;
-use js_sys::{Array, Uint8Array};
+use js_sys::{Array, Reflect, Uint8Array};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{
@@ -25,6 +25,10 @@ pub(super) fn use_web_audio_recorder(
     let mut completed = use_signal(|| None::<RecordedAudio>);
     let mut analyser = use_signal(|| None::<AudioAnalyser>);
     let mut elapsed = use_signal(|| Duration::ZERO);
+    let mut requested_constraints = use_signal(|| None::<RecordingConstraints>);
+    let mut constraint_capabilities = use_signal(|| None::<RecorderConstraintCapabilities>);
+    let mut settings = use_signal(|| None::<RecordingSourceSettings>);
+    let mut media_type = use_signal(|| None::<String>);
     let mut microphone = use_signal(|| MicrophoneStatus {
         permission: MicrophonePermission::Unknown,
         recorder: RecorderStatus::Idle,
@@ -34,6 +38,10 @@ pub(super) fn use_web_audio_recorder(
     let runtime = use_hook(|| Rc::new(RefCell::new(Runtime::default())));
     let dioxus_runtime = DioxusRuntime::current();
     let dioxus_scope = dioxus_runtime.current_scope_id();
+
+    use_effect(move || {
+        constraint_capabilities.set(read_constraint_capabilities());
+    });
 
     {
         let runtime = Rc::downgrade(&runtime);
@@ -61,6 +69,9 @@ pub(super) fn use_web_audio_recorder(
 
         let session = runtime_for_start.borrow_mut().lifecycle.start()?;
         let input_device = selected_input();
+        requested_constraints.set(Some(options.constraints.clone()));
+        settings.set(None);
+        media_type.set(None);
         {
             let mut runtime = runtime_for_start.borrow_mut();
             runtime.elapsed_ms = 0.0;
@@ -94,6 +105,8 @@ pub(super) fn use_web_audio_recorder(
                 analyser,
                 elapsed,
                 microphone,
+                settings,
+                media_type,
                 dioxus_runtime.clone(),
                 dioxus_scope,
             )
@@ -220,6 +233,10 @@ pub(super) fn use_web_audio_recorder(
         analyser: analyser.into(),
         elapsed: elapsed.into(),
         microphone: microphone.into(),
+        requested_constraints: requested_constraints.into(),
+        constraint_capabilities: constraint_capabilities.into(),
+        settings: settings.into(),
+        media_type: media_type.into(),
         start,
         pause,
         resume,
@@ -361,10 +378,12 @@ async fn start_session(
     mut analyser_signal: Signal<Option<AudioAnalyser>>,
     mut elapsed: Signal<Duration>,
     mut microphone: Signal<MicrophoneStatus>,
+    mut settings_signal: Signal<Option<RecordingSourceSettings>>,
+    mut media_type_signal: Signal<Option<String>>,
     dioxus_runtime: Rc<DioxusRuntime>,
     dioxus_scope: ScopeId,
 ) -> Result<(), AudioError> {
-    let stream = acquire_stream(input_device.as_ref()).await?;
+    let stream = acquire_stream(input_device.as_ref(), &options.constraints).await?;
     let mut pending = PendingCapture::new(stream);
     if !runtime.borrow().mounted || runtime.borrow().lifecycle.active_session != Some(session_id) {
         return Ok(());
@@ -422,7 +441,21 @@ async fn start_session(
                 "microphone stream has no audio track",
             )
         })?;
+    let settings = read_settings(&track);
     let chunks = Rc::new(RefCell::new(Vec::<Blob>::new()));
+    let start_resolver = Rc::new(RefCell::new(None::<js_sys::Function>));
+    let resolver_for_promise = start_resolver.clone();
+    let start_promise = js_sys::Promise::new(&mut move |resolve, _| {
+        resolver_for_promise.borrow_mut().replace(resolve);
+    });
+    let start_succeeded = Rc::new(Cell::new(false));
+    let resolver_for_start = start_resolver.clone();
+    let succeeded_for_start = start_succeeded.clone();
+    let on_start = Closure::wrap(Box::new(move || {
+        succeeded_for_start.set(true);
+        settle_start(&resolver_for_start);
+    }) as Box<dyn FnMut()>);
+    recorder.set_onstart(Some(on_start.as_ref().unchecked_ref()));
 
     let chunks_for_data = chunks.clone();
     let on_data = Closure::wrap(Box::new(move |event: BlobEvent| {
@@ -437,7 +470,9 @@ async fn start_session(
     let runtime_for_stop = Rc::downgrade(runtime);
     let recorder_for_stop = recorder.clone();
     let dioxus_runtime_for_stop = dioxus_runtime.clone();
+    let resolver_for_stop = start_resolver.clone();
     let on_stop = Closure::wrap(Box::new(move || {
+        settle_start(&resolver_for_stop);
         dioxus_runtime_for_stop.in_scope(dioxus_scope, || {
             let Some(runtime) = runtime_for_stop.upgrade() else {
                 return;
@@ -551,7 +586,9 @@ async fn start_session(
 
     let runtime_for_error = Rc::downgrade(runtime);
     let dioxus_runtime_for_error = dioxus_runtime.clone();
+    let resolver_for_error = start_resolver.clone();
     let on_error = Closure::wrap(Box::new(move || {
+        settle_start(&resolver_for_error);
         dioxus_runtime_for_error.in_scope(dioxus_scope, || {
             let Some(runtime) = runtime_for_error.upgrade() else {
                 return;
@@ -660,7 +697,20 @@ async fn start_session(
     let _ = track.add_event_listener_with_callback("ended", on_ended.as_ref().unchecked_ref());
 
     let initially_muted = track.muted();
-    recorder.start().map_err(audio_error_from_js)?;
+    if let Err(error) = recorder.start() {
+        recorder.set_onstart(None);
+        return Err(audio_error_from_js(error));
+    }
+    let _ = wasm_bindgen_futures::JsFuture::from(start_promise).await;
+    recorder.set_onstart(None);
+    drop(on_start);
+    if !start_succeeded.get() {
+        return Err(AudioError::new(
+            AudioErrorKind::RecorderFailure,
+            "media recorder failed before starting",
+        ));
+    }
+    let media_type = recorder.mime_type();
     let (stream, context) = pending.into_parts();
     let analyser = AudioAnalyser::new(analyser_node);
     let session = WebSession {
@@ -694,6 +744,8 @@ async fn start_session(
     dioxus_runtime.in_scope(dioxus_scope, || {
         analyser_signal.set(Some(analyser));
         elapsed.set(Duration::ZERO);
+        settings_signal.set(Some(settings));
+        media_type_signal.set(Some(media_type));
         publish_status(
             runtime,
             &mut status,
@@ -704,17 +756,45 @@ async fn start_session(
     Ok(())
 }
 
-async fn acquire_stream(input_device: Option<&AudioInputId>) -> Result<MediaStream, AudioError> {
+async fn acquire_stream(
+    input_device: Option<&AudioInputId>,
+    requested: &RecordingConstraints,
+) -> Result<MediaStream, AudioError> {
     let constraints = web_sys::MediaStreamConstraints::new();
+    let audio = web_sys::MediaTrackConstraints::new();
     if let Some(input_device) = input_device {
-        let audio = web_sys::MediaTrackConstraints::new();
         let exact = web_sys::ConstrainDomStringParameters::new();
         exact.set_exact_str(input_device.as_str());
         audio.set_device_id_constrain_dom_string_parameters(&exact);
-        constraints.set_audio_media_track_constraints(&audio);
-    } else {
-        constraints.set_audio(&JsValue::TRUE);
     }
+    set_constraint(
+        &audio,
+        "channelCount",
+        requested.channel_count.as_ref(),
+        |value| JsValue::from_f64(*value as f64),
+    )?;
+    set_constraint(
+        &audio,
+        "sampleRate",
+        requested.sample_rate.as_ref(),
+        |value| JsValue::from_f64(*value as f64),
+    )?;
+    set_constraint(
+        &audio,
+        "echoCancellation",
+        requested.echo_cancellation.as_ref(),
+        |value| JsValue::from_bool(*value),
+    )?;
+    set_constraint(
+        &audio,
+        "noiseSuppression",
+        requested.noise_suppression.as_ref(),
+        |value| JsValue::from_bool(*value),
+    )?;
+    set_constraint(&audio, "latency", requested.latency.as_ref(), |value| {
+        JsValue::from_f64(value.as_secs_f64())
+    })?;
+    constraints.set_audio_media_track_constraints(&audio);
     let value = wasm_bindgen_futures::JsFuture::from(
         media_devices()?
             .get_user_media_with_constraints(&constraints)
@@ -723,6 +803,95 @@ async fn acquire_stream(input_device: Option<&AudioInputId>) -> Result<MediaStre
     .await
     .map_err(audio_error_from_js)?;
     value.dyn_into::<MediaStream>().map_err(audio_error_from_js)
+}
+
+fn read_constraint_capabilities() -> Option<RecorderConstraintCapabilities> {
+    let supported = media_devices().ok()?.get_supported_constraints();
+    Some(RecorderConstraintCapabilities {
+        channel_count: supported.get_channel_count().unwrap_or(false),
+        sample_rate: supported.get_sample_rate().unwrap_or(false),
+        echo_cancellation: supported.get_echo_cancellation().unwrap_or(false),
+        noise_suppression: supported.get_noise_suppression().unwrap_or(false),
+        latency: supported.get_latency().unwrap_or(false),
+    })
+}
+
+fn read_settings(track: &MediaStreamTrack) -> RecordingSourceSettings {
+    let settings = track.get_settings();
+    let settings = settings.as_ref();
+    RecordingSourceSettings {
+        channel_count: read_u32(settings, "channelCount"),
+        sample_rate: read_u32(settings, "sampleRate"),
+        echo_cancellation: read_bool(settings, "echoCancellation"),
+        noise_suppression: read_bool(settings, "noiseSuppression"),
+        latency: read_number(settings, "latency").and_then(|seconds| {
+            if seconds.is_finite() && seconds >= 0.0 {
+                Duration::try_from_secs_f64(seconds).ok()
+            } else {
+                None
+            }
+        }),
+    }
+}
+
+fn read_u32(value: &JsValue, field: &str) -> Option<u32> {
+    let number = read_number(value, field)?;
+    if number.is_finite() && number >= 0.0 && number <= u32::MAX as f64 && number.fract() == 0.0 {
+        Some(number as u32)
+    } else {
+        None
+    }
+}
+
+fn read_number(value: &JsValue, field: &str) -> Option<f64> {
+    Reflect::get(value, &JsValue::from_str(field))
+        .ok()?
+        .as_f64()
+}
+
+fn read_bool(value: &JsValue, field: &str) -> Option<bool> {
+    Reflect::get(value, &JsValue::from_str(field))
+        .ok()?
+        .as_bool()
+}
+
+fn set_constraint<T>(
+    target: &web_sys::MediaTrackConstraints,
+    field: &str,
+    constraint: Option<&RecordingConstraint<T>>,
+    into_js: impl FnOnce(&T) -> JsValue,
+) -> Result<(), AudioError> {
+    if let Some(constraint) = constraint {
+        let (kind, value) = match constraint {
+            RecordingConstraint::Ideal(value) => ("ideal", value),
+            RecordingConstraint::Exact(value) => ("exact", value),
+        };
+        set_js_constraint(target, field, kind, into_js(value))?;
+    }
+    Ok(())
+}
+
+fn set_js_constraint(
+    target: &web_sys::MediaTrackConstraints,
+    field: &str,
+    kind: &str,
+    value: JsValue,
+) -> Result<(), AudioError> {
+    let constraint = js_sys::Object::new();
+    Reflect::set(&constraint, &JsValue::from_str(kind), &value).map_err(audio_error_from_js)?;
+    Reflect::set(
+        target.as_ref(),
+        &JsValue::from_str(field),
+        constraint.as_ref(),
+    )
+    .map_err(audio_error_from_js)?;
+    Ok(())
+}
+
+fn settle_start(resolver: &Rc<RefCell<Option<js_sys::Function>>>) {
+    if let Some(resolve) = resolver.borrow_mut().take() {
+        let _ = resolve.call0(&JsValue::UNDEFINED);
+    }
 }
 
 async fn run_timer(

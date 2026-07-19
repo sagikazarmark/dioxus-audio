@@ -329,18 +329,25 @@ pub(crate) mod web {
             .dyn_ref::<web_sys::DomException>()
             .map(web_sys::DomException::name)
             .unwrap_or_default();
-        let kind = match name.as_str() {
-            "NotAllowedError" | "SecurityError" => AudioErrorKind::PermissionDenied,
-            "NotFoundError" | "OverconstrainedError" => AudioErrorKind::DeviceNotFound,
-            "NotReadableError" | "AbortError" => AudioErrorKind::DeviceUnavailable,
-            _ => AudioErrorKind::Backend,
-        };
         let message = value
             .dyn_ref::<web_sys::DomException>()
             .map(web_sys::DomException::message)
             .or_else(|| value.as_string())
             .filter(|message| !message.is_empty())
             .unwrap_or_else(|| "browser audio operation failed".to_string());
+        if name == "OverconstrainedError" {
+            let constraint = js_sys::Reflect::get(&value, &JsValue::from_str("constraint"))
+                .ok()
+                .and_then(|constraint| constraint.as_string())
+                .unwrap_or_default();
+            return AudioError::overconstrained(constraint, message);
+        }
+        let kind = match name.as_str() {
+            "NotAllowedError" | "SecurityError" => AudioErrorKind::PermissionDenied,
+            "NotFoundError" => AudioErrorKind::DeviceNotFound,
+            "NotReadableError" | "AbortError" => AudioErrorKind::DeviceUnavailable,
+            _ => AudioErrorKind::Backend,
+        };
         AudioError::new(kind, message)
     }
 }

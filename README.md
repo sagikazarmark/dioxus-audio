@@ -139,14 +139,30 @@ invalidates an outstanding play request, and returns a loaded source to
 source is replaced or unloaded and applies to the next loaded source. It is
 separate from Bounded Playback over a Waveform Selection.
 
+Mute is observable through `muted()` and can be changed with `set_muted()` or
+`toggle_muted()` without pausing Playback, seeking, or changing the retained
+audibility level. `set_audibility_level()` accepts a finite normalized value in
+the inclusive range `0.0..=1.0`; invalid values are rejected without changing
+public state. Mute and level preferences survive source replacement and unload
+and apply to the next source.
+
+Always inspect `audibility_capability()` before describing the level as
+effective output gain. Current direct Playback reports
+`PlaybackAudibilityCapability::BestEffortMediaElement`: the browser media
+element receives the value, but some platforms, notably iOS, may not apply it
+to perceived loudness. `EffectiveGraphGain` is reserved for graph-backed
+Playback; direct control does not claim that guarantee. Mute and all transport
+commands remain independent from level capability.
+
 The same Controller can drive independently arranged `PlaybackSeekSlider`,
 `PlaybackSkipButton`, `PlaybackStopButton`, `PlaybackPlayPauseButton`,
-`PlaybackRateButton`, and `PlaybackRepeatButton` components. Labels, signed skip
-amounts, and the rate cycle are configurable. Repeat uses a stable label and
-native pressed state. The seek slider exposes source-time value text, which can
-be replaced with a localized `value_text`. `PlaybackStatusAnnouncer` is an
-optional polite live region for coarse lifecycle changes and never announces
-position continuously.
+`PlaybackRateButton`, `PlaybackMuteButton`, `PlaybackAudibilitySlider`, and
+`PlaybackRepeatButton` components. Labels, signed skip amounts, and the rate
+cycle are configurable. Mute and repeat use stable labels and native pressed
+state. The seek and audibility sliders expose meaningful value text, which can
+be replaced with localized `value_text`. `PlaybackStatusAnnouncer` is an optional
+polite live region for coarse lifecycle changes and never announces position or
+audibility changes.
 
 ## Platform Support
 

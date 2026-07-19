@@ -67,9 +67,13 @@ pub(super) fn use_web_audio_player(
             ) {
                 Ok(resource) => {
                     resource.element.set_playback_rate(*rate.peek());
+                    let runtime_ref = runtime.borrow();
+                    resource.element.set_loop(runtime_ref.lifecycle.repeat());
+                    resource.element.set_muted(runtime_ref.lifecycle.muted());
                     resource
                         .element
-                        .set_loop(runtime.borrow().lifecycle.repeat());
+                        .set_volume(runtime_ref.lifecycle.audibility_level().value());
+                    drop(runtime_ref);
                     runtime.borrow_mut().resource = Some(resource);
                 }
                 Err(error) => {
@@ -261,6 +265,34 @@ pub(super) fn use_web_audio_player(
         publish_lifecycle(&runtime.lifecycle, status, snapshot);
     });
 
+    let runtime_for_muted = runtime.clone();
+    let set_muted = use_callback(move |muted: bool| {
+        let mut runtime = runtime_for_muted.borrow_mut();
+        runtime.lifecycle.set_muted(muted);
+        if let Some(resource) = runtime.resource.as_ref() {
+            resource.element.set_muted(muted);
+        }
+        publish_lifecycle(&runtime.lifecycle, status, snapshot);
+    });
+
+    let runtime_for_audibility = runtime.clone();
+    let set_audibility_level: Callback<f64, Result<(), PlaybackCommandError>> =
+        use_callback(move |requested: f64| {
+            let level = PlaybackAudibilityLevel::new(requested)?;
+            let mut runtime = runtime_for_audibility.borrow_mut();
+            if runtime.lifecycle.audibility_capability()
+                == PlaybackAudibilityCapability::Unavailable
+            {
+                return Err(PlaybackCommandError("audibility level is unavailable"));
+            }
+            if let Some(resource) = runtime.resource.as_ref() {
+                resource.element.set_volume(level.value());
+            }
+            runtime.lifecycle.set_validated_audibility_level(level);
+            publish_lifecycle(&runtime.lifecycle, status, snapshot);
+            Ok(())
+        });
+
     AudioPlayerController {
         status: status.into(),
         snapshot: snapshot.into(),
@@ -274,6 +306,8 @@ pub(super) fn use_web_audio_player(
         skip,
         set_rate,
         set_repeat,
+        set_muted,
+        set_audibility_level,
     }
 }
 

@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use dioxus_audio::playback::{
-    PlaybackLifecycle, PlaybackPlayFailure, PlaybackReadiness, PlaybackSourceLifecycle,
-    PlaybackStatus, PlaybackTransport, clamp_seek, use_audio_player,
+    PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackLifecycle, PlaybackPlayFailure,
+    PlaybackReadiness, PlaybackSourceLifecycle, PlaybackStatus, PlaybackTransport, clamp_seek,
+    use_audio_player,
 };
 use dioxus_audio::{AudioData, AudioError, AudioErrorKind};
 
@@ -212,6 +213,61 @@ fn repeat_preference_survives_source_replacement_and_unload() {
 
     playback.toggle_repeat();
     assert!(!playback.repeat());
+}
+
+#[test]
+fn mute_changes_audibility_without_changing_transport() {
+    let mut playback = PlaybackLifecycle::default();
+    assert!(!playback.muted());
+    assert_eq!(playback.audibility_level(), PlaybackAudibilityLevel::FULL);
+    assert_eq!(
+        playback.audibility_capability(),
+        PlaybackAudibilityCapability::BestEffortMediaElement
+    );
+
+    playback.loaded();
+    playback.request_play().unwrap();
+    playback.playing();
+    let transport = playback.transport();
+
+    playback.set_muted(true);
+
+    assert!(playback.muted());
+    assert_eq!(playback.transport(), transport);
+    assert_eq!(playback.status(), &PlaybackStatus::Playing);
+    assert_eq!(playback.audibility_level(), PlaybackAudibilityLevel::FULL);
+
+    playback.toggle_muted();
+    assert!(!playback.muted());
+}
+
+#[test]
+fn audibility_level_rejects_invalid_values_and_survives_source_lifecycle() {
+    let mut playback = PlaybackLifecycle::default();
+    playback.set_audibility_level(0.35).unwrap();
+    playback.set_muted(true);
+
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01, 1.01] {
+        assert!(playback.set_audibility_level(invalid).is_err());
+        assert_eq!(playback.audibility_level().value(), 0.35);
+    }
+
+    playback.loading();
+    playback.loaded();
+    playback.failed(AudioError::new(
+        AudioErrorKind::PlaybackFailure,
+        "source failed",
+    ));
+    playback.unload();
+
+    assert!(playback.muted());
+    assert_eq!(playback.audibility_level().value(), 0.35);
+
+    playback.set_muted(false);
+    playback.set_audibility_level(0.0).unwrap();
+    assert!(!playback.muted(), "level zero is not the mute preference");
+    playback.set_audibility_level(1.0).unwrap();
+    assert_eq!(playback.audibility_level(), PlaybackAudibilityLevel::FULL);
 }
 
 #[test]

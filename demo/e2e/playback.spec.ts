@@ -238,6 +238,109 @@ test("whole-source repeat loops and persists through replacement and unload", as
   await expect(player).toHaveAttribute("data-repeat", "false");
 });
 
+test("mute and direct audibility preferences remain observable and persistent", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback", "Load audio only when it is needed");
+  await page.evaluate(() => {
+    const nativePlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+      (window as PlaybackTestWindow).pendingPlaybackElement = this;
+      return nativePlay.call(this);
+    };
+  });
+
+  const player = page.locator(".dioxus-audio__player");
+  const mute = page.getByRole("button", { name: "Mute", exact: true });
+  const level = page.getByRole("slider", {
+    name: "Audibility level",
+    exact: true,
+  });
+
+  await expect(player).toHaveAttribute(
+    "data-audibility-capability",
+    "best-effort-media-element",
+  );
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await expect(player).toHaveAttribute("data-transport", "playing");
+  const seek = page.getByRole("slider", { name: "Seek audio" });
+  await page.evaluate(() => {
+    const element = (window as PlaybackTestWindow).pendingPlaybackElement;
+    if (element) {
+      element.playbackRate = 0.25;
+      element.currentTime = 1;
+      element.dispatchEvent(new Event("timeupdate"));
+    }
+  });
+  await expect(seek).toHaveValue("1");
+
+  await mute.focus();
+  await mute.press("Space");
+  await expect(mute).toBeFocused();
+  await expect(mute).toHaveAttribute("aria-pressed", "true");
+  await expect(player).toHaveAttribute("data-muted", "true");
+  await expect(player).toHaveAttribute("data-transport", "playing");
+  await expect
+    .poll(async () => Number(await seek.inputValue()), { timeout: 500 })
+    .toBeGreaterThan(0.9);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const element = (window as PlaybackTestWindow).pendingPlaybackElement;
+        return element ? { muted: element.muted, paused: element.paused } : null;
+      }),
+    )
+    .toEqual({ muted: true, paused: false });
+
+  await level.fill("0.35");
+  await expect(level).toBeFocused();
+  await expect(level).toHaveValue("0.35");
+  await expect(level).toHaveAttribute("aria-valuetext", "35 percent");
+  await expect(player).toHaveAttribute("data-audibility-level", "0.35");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as PlaybackTestWindow).pendingPlaybackElement?.volume ?? null,
+      ),
+    )
+    .toBe(0.35);
+
+  await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Stop", exact: true })).toBeEnabled();
+  await expect(seek).toBeEnabled();
+  await expect(page.getByRole("button", { name: /^Playback speed:/ })).toBeEnabled();
+
+  await page.getByRole("button", { name: "Replace", exact: true }).click();
+  await expect(player).toHaveAttribute("data-muted", "true");
+  await expect(player).toHaveAttribute("data-audibility-level", "0.35");
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const element = (window as PlaybackTestWindow).pendingPlaybackElement;
+        return element ? { muted: element.muted, volume: element.volume } : null;
+      }),
+    )
+    .toEqual({ muted: true, volume: 0.35 });
+
+  await page.getByRole("button", { name: "Unload", exact: true }).click();
+  await expect(player).toHaveAttribute("data-source", "empty");
+  await expect(player).toHaveAttribute("data-muted", "true");
+  await expect(player).toHaveAttribute("data-audibility-level", "0.35");
+
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const element = (window as PlaybackTestWindow).pendingPlaybackElement;
+        return element ? { muted: element.muted, volume: element.volume } : null;
+      }),
+    )
+    .toEqual({ muted: true, volume: 0.35 });
+});
+
 test("replacement and unload ignore stale playback outcomes", async ({
   openRoute,
   page,

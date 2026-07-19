@@ -806,6 +806,10 @@ function teachingControls(page: Page): TeachingControl[] {
     teachingControl(studio.getByRole("button", { name: "Denied" })),
     packageControl(studio.getByRole("button", { name: "Play", exact: true })),
     packageControl(studio.getByRole("button", { name: "Playback speed: 1x" })),
+    packageControl(studio.getByRole("button", { name: "Mute", exact: true })),
+    packageControl(
+      studio.getByRole("slider", { name: "Audibility level", exact: true }),
+    ),
     packageControl(studio.getByRole("button", { name: "Repeat", exact: true })),
     ...sourceRecipeControls(regions.studio, 2),
     ...clipEditorControls(citrus),
@@ -816,6 +820,15 @@ function teachingControls(page: Page): TeachingControl[] {
     ),
     packageControl(
       regions.fallback.getByRole("button", { name: "Playback speed: 1x" }),
+    ),
+    packageControl(
+      regions.fallback.getByRole("button", { name: "Mute", exact: true }),
+    ),
+    packageControl(
+      regions.fallback.getByRole("slider", {
+        name: "Audibility level",
+        exact: true,
+      }),
     ),
     packageControl(
       regions.fallback.getByRole("button", { name: "Repeat", exact: true }),
@@ -867,6 +880,8 @@ function playerControls(example: Locator, includeStop = true): Locator[] {
     example.getByRole("button", { name: "Play", exact: true }),
     example.getByRole("button", { name: "Skip forward 15 seconds" }),
     example.getByRole("button", { name: /^Playback speed:/ }),
+    example.getByRole("button", { name: "Mute", exact: true }),
+    example.getByRole("slider", { name: "Audibility level", exact: true }),
     example.getByRole("button", { name: "Repeat", exact: true }),
   ];
 }

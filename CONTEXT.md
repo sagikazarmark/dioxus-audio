@@ -41,6 +41,13 @@ Loading and audibly presenting **Audio Data**, including position, seeking,
 pausing, and playback rate.
 _Avoid_: Audio data, player component
 
+**Audibility Level**:
+A normalized **Playback** preference from silent to full. Its reported
+capability distinguishes effective gain, best-effort direct control, and
+unavailable control. Audibility Level is independent of mute and does not
+promise perceived loudness.
+_Avoid_: Volume, perceived loudness, input mute
+
 **Analyser**:
 A live read interface for time-domain, frequency-domain, and level information
 from active audio.

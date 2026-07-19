@@ -19,6 +19,12 @@ test("audio controls remain operable in the constrained viewport", async ({
     page.getByRole("button", { name: "Playback speed: 1.5x" }),
   ).toBeInViewport();
 
+  const audibility = page.getByRole("slider", { name: "Audibility level" });
+  await audibility.scrollIntoViewIfNeeded();
+  await expect(audibility).toBeInViewport();
+  await audibility.fill("0.5");
+  await expect(audibility).toHaveAttribute("aria-valuetext", "50 percent");
+
   const play = page.getByRole("button", { name: "Play", exact: true });
   await play.click();
   const pause = page.getByRole("button", { name: "Pause", exact: true });

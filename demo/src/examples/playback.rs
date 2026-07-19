@@ -4,9 +4,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use dioxus_audio::AudioData;
 use dioxus_audio::components::{
-    AudioPlayer, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton,
-    PlaybackSeekSlider, PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton,
-    WaveformPreview,
+    AudioPlayer, PlaybackAudibilitySlider, PlaybackMuteButton, PlaybackPlayPauseButton,
+    PlaybackRateButton, PlaybackRepeatButton, PlaybackSeekSlider, PlaybackSkipButton,
+    PlaybackStatusAnnouncer, PlaybackStopButton, WaveformPreview,
 };
 use dioxus_audio::playback::use_audio_player;
 
@@ -68,6 +68,14 @@ pub fn PlaybackExample() -> Element {
                         rates: vec![0.75, 1.0, 1.25],
                         label: "Listening rate".to_string(),
                     }
+                    PlaybackMuteButton {
+                        controller: custom_controller,
+                        label: "Mute custom tone".to_string(),
+                    }
+                    PlaybackAudibilitySlider {
+                        controller: custom_controller,
+                        label: "Custom tone audibility".to_string(),
+                    }
                     PlaybackRepeatButton {
                         controller: custom_controller,
                         label: "Repeat custom tone".to_string(),
@@ -75,8 +83,13 @@ pub fn PlaybackExample() -> Element {
                 }
             }
             div { class: "flex items-center justify-between gap-3 text-sm text-base-content/60",
-                span {
-                    if loaded { "Audio bytes loaded" } else { "Audio loads on first play" }
+                div {
+                    span {
+                        if loaded { "Audio bytes loaded" } else { "Audio loads on first play" }
+                    }
+                    p { class: "mt-1 text-xs",
+                        "Audibility level uses best-effort direct media control; mute remains independent."
+                    }
                 }
                 if loaded {
                     div { class: "flex items-center gap-1",

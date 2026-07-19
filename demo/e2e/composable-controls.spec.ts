@@ -19,6 +19,21 @@ test("independent playback controls keep focus and configuration", async ({
   await repeat.press("Space");
   await expect(repeat).toHaveAttribute("aria-pressed", "false");
 
+  const mute = controls.getByRole("button", { name: "Mute custom tone" });
+  await mute.focus();
+  await mute.press("Space");
+  await expect(mute).toBeFocused();
+  await expect(mute).toHaveAttribute("aria-pressed", "true");
+
+  const audibility = controls.getByRole("slider", {
+    name: "Custom tone audibility",
+  });
+  await audibility.focus();
+  await audibility.press("Home");
+  await expect(audibility).toBeFocused();
+  await expect(audibility).toHaveValue("0");
+  await expect(audibility).toHaveAttribute("aria-valuetext", "0 percent");
+
   const play = controls.getByRole("button", {
     name: "Play custom tone",
     exact: true,

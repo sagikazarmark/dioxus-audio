@@ -71,6 +71,51 @@ impl PlaybackPlayFailure {
     }
 }
 
+/// How directly setting Playback's audibility level affects output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackAudibilityCapability {
+    /// An owned Playback graph applies effective gain.
+    EffectiveGraphGain,
+    /// The media element accepts the level, but some browsers may not apply it audibly.
+    BestEffortMediaElement,
+    /// This Playback owner cannot set an audibility level.
+    Unavailable,
+}
+
+/// A finite normalized Playback audibility preference in the inclusive range `0.0..=1.0`.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct PlaybackAudibilityLevel(f64);
+
+impl PlaybackAudibilityLevel {
+    pub const SILENT: Self = Self(0.0);
+    pub const FULL: Self = Self(1.0);
+
+    /// Validate a normalized audibility level.
+    pub fn new(value: f64) -> Result<Self, PlaybackCommandError> {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(PlaybackCommandError(
+                "audibility level must be finite and between 0 and 1",
+            ));
+        }
+
+        Ok(Self(value))
+    }
+
+    pub fn value(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for PlaybackAudibilityLevel {
+    fn default() -> Self {
+        Self::FULL
+    }
+}
+
+// Construction excludes NaN, so the value has reflexive equality.
+impl Eq for PlaybackAudibilityLevel {}
+
 /// One coherent observation of Playback's independent state facets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -81,6 +126,12 @@ pub struct PlaybackSnapshot {
     pub play_failure: Option<PlaybackPlayFailure>,
     /// Whole-source repeat preference, retained across source replacement and unload.
     pub repeat: bool,
+    /// Mute preference, retained independently from transport and audibility level.
+    pub muted: bool,
+    /// Normalized audibility preference, retained across source replacement and unload.
+    pub audibility_level: PlaybackAudibilityLevel,
+    /// The effectiveness contract for setting [`Self::audibility_level`].
+    pub audibility_capability: PlaybackAudibilityCapability,
 }
 
 impl Default for PlaybackSnapshot {
@@ -91,6 +142,9 @@ impl Default for PlaybackSnapshot {
             readiness: PlaybackReadiness::Unavailable,
             play_failure: None,
             repeat: false,
+            muted: false,
+            audibility_level: PlaybackAudibilityLevel::FULL,
+            audibility_capability: PlaybackAudibilityCapability::BestEffortMediaElement,
         }
     }
 }
@@ -158,16 +212,41 @@ impl PlaybackLifecycle {
         self.snapshot.repeat = !self.snapshot.repeat;
     }
 
+    pub fn muted(&self) -> bool {
+        self.snapshot.muted
+    }
+
+    pub fn set_muted(&mut self, muted: bool) {
+        self.snapshot.muted = muted;
+    }
+
+    pub fn toggle_muted(&mut self) {
+        self.snapshot.muted = !self.snapshot.muted;
+    }
+
+    pub fn audibility_level(&self) -> PlaybackAudibilityLevel {
+        self.snapshot.audibility_level
+    }
+
+    pub fn set_audibility_level(&mut self, level: f64) -> Result<(), PlaybackCommandError> {
+        self.set_validated_audibility_level(PlaybackAudibilityLevel::new(level)?);
+        Ok(())
+    }
+
+    fn set_validated_audibility_level(&mut self, level: PlaybackAudibilityLevel) {
+        self.snapshot.audibility_level = level;
+    }
+
+    pub fn audibility_capability(&self) -> PlaybackAudibilityCapability {
+        self.snapshot.audibility_capability
+    }
+
     pub fn loading(&mut self) {
-        let repeat = self.snapshot.repeat;
         self.status = PlaybackStatus::Loading;
-        self.snapshot = PlaybackSnapshot {
-            source: PlaybackSourceLifecycle::Loading,
-            transport: PlaybackTransport::Idle,
-            readiness: PlaybackReadiness::LoadingMetadata,
-            play_failure: None,
-            repeat,
-        };
+        self.snapshot.source = PlaybackSourceLifecycle::Loading;
+        self.snapshot.transport = PlaybackTransport::Idle;
+        self.snapshot.readiness = PlaybackReadiness::LoadingMetadata;
+        self.snapshot.play_failure = None;
     }
 
     pub fn loaded(&mut self) {
@@ -290,24 +369,19 @@ impl PlaybackLifecycle {
     }
 
     pub fn failed(&mut self, error: AudioError) {
-        let repeat = self.snapshot.repeat;
         self.status = PlaybackStatus::Failed(error.clone());
-        self.snapshot = PlaybackSnapshot {
-            source: PlaybackSourceLifecycle::Failed(error),
-            transport: PlaybackTransport::Idle,
-            readiness: PlaybackReadiness::Unavailable,
-            play_failure: None,
-            repeat,
-        };
+        self.snapshot.source = PlaybackSourceLifecycle::Failed(error);
+        self.snapshot.transport = PlaybackTransport::Idle;
+        self.snapshot.readiness = PlaybackReadiness::Unavailable;
+        self.snapshot.play_failure = None;
     }
 
     pub fn unload(&mut self) {
-        let repeat = self.snapshot.repeat;
         self.status = PlaybackStatus::Empty;
-        self.snapshot = PlaybackSnapshot {
-            repeat,
-            ..Default::default()
-        };
+        self.snapshot.source = PlaybackSourceLifecycle::Empty;
+        self.snapshot.transport = PlaybackTransport::Idle;
+        self.snapshot.readiness = PlaybackReadiness::Unavailable;
+        self.snapshot.play_failure = None;
     }
 }
 
@@ -333,6 +407,8 @@ pub struct AudioPlayerController {
     skip: Callback<f64>,
     set_rate: Callback<f64, Result<(), PlaybackCommandError>>,
     set_repeat: Callback<bool>,
+    set_muted: Callback<bool>,
+    set_audibility_level: Callback<f64, Result<(), PlaybackCommandError>>,
 }
 
 impl AudioPlayerController {
@@ -358,6 +434,18 @@ impl AudioPlayerController {
 
     pub fn repeat(self) -> bool {
         self.snapshot.read().repeat
+    }
+
+    pub fn muted(self) -> bool {
+        self.snapshot.read().muted
+    }
+
+    pub fn audibility_level(self) -> PlaybackAudibilityLevel {
+        self.snapshot.read().audibility_level
+    }
+
+    pub fn audibility_capability(self) -> PlaybackAudibilityCapability {
+        self.snapshot.read().audibility_capability
     }
 
     pub fn play(self) -> Result<(), PlaybackCommandError> {
@@ -394,6 +482,24 @@ impl AudioPlayerController {
     pub fn toggle_repeat(self) {
         self.set_repeat(!self.repeat());
     }
+
+    /// Set mute without changing transport, position, or the audibility level preference.
+    pub fn set_muted(self, muted: bool) {
+        self.set_muted.call(muted);
+    }
+
+    /// Toggle mute without changing transport, position, or the audibility level preference.
+    pub fn toggle_muted(self) {
+        self.set_muted(!self.muted());
+    }
+
+    /// Set the normalized audibility preference in the inclusive range `0.0..=1.0`.
+    ///
+    /// Consult [`Self::audibility_capability`] before presenting this value as effective
+    /// output gain. Direct media-element control is best effort on some browsers.
+    pub fn set_audibility_level(self, level: f64) -> Result<(), PlaybackCommandError> {
+        self.set_audibility_level.call(level)
+    }
 }
 
 pub fn use_audio_player(
@@ -423,14 +529,17 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
     use_effect(move || {
         duration.set(initial_duration());
         let error = AudioError::unsupported();
-        let repeat = snapshot.peek().repeat;
+        let preferences = snapshot.peek().clone();
         status.set(PlaybackStatus::Failed(error.clone()));
         snapshot.set(PlaybackSnapshot {
             source: PlaybackSourceLifecycle::Failed(error),
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::Unavailable,
             play_failure: None,
-            repeat,
+            repeat: preferences.repeat,
+            muted: preferences.muted,
+            audibility_level: preferences.audibility_level,
+            audibility_capability: PlaybackAudibilityCapability::Unavailable,
         });
     });
     let unsupported: Callback<(), Result<(), PlaybackCommandError>> =
@@ -443,6 +552,12 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
     let set_repeat = use_callback(move |repeat: bool| {
         snapshot_for_repeat.write().repeat = repeat;
     });
+    let mut snapshot_for_muted = snapshot;
+    let set_muted = use_callback(move |muted: bool| {
+        snapshot_for_muted.write().muted = muted;
+    });
+    let set_audibility_level: Callback<f64, Result<(), PlaybackCommandError>> =
+        use_callback(|_: f64| Err(PlaybackCommandError("audio playback is unsupported")));
     AudioPlayerController {
         status: status.into(),
         snapshot: snapshot.into(),
@@ -456,5 +571,7 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
         skip,
         set_rate,
         set_repeat,
+        set_muted,
+        set_audibility_level,
     }
 }

@@ -347,6 +347,22 @@
   font-variant-numeric: tabular-nums;
 }
 
+.dioxus-audio__audibility {
+  width: 5.5rem;
+  accent-color: var(--_dxa-primary);
+  cursor: pointer;
+}
+
+.dioxus-audio__audibility:focus-visible {
+  outline: 2px solid var(--_dxa-primary);
+  outline-offset: 2px;
+}
+
+.dioxus-audio__audibility:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
 .dioxus-audio__player-error {
   color: var(--_dxa-error);
   font-size: 0.8125rem;

@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use dioxus::prelude::*;
-use dioxus_icons::lucide::{Pause, Play, Repeat2, RotateCcw, RotateCw, Square};
+use dioxus_icons::lucide::{Pause, Play, Repeat2, RotateCcw, RotateCw, Square, Volume2, VolumeX};
 
 use super::AudioScrubber;
 use crate::playback::{
-    AudioPlayerController, PlaybackPlayFailure, PlaybackReadiness, PlaybackSourceLifecycle,
-    PlaybackStatus, PlaybackTransport, use_audio_player,
+    AudioPlayerController, PlaybackAudibilityCapability, PlaybackPlayFailure, PlaybackReadiness,
+    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTransport, use_audio_player,
 };
 use crate::{AudioData, AudioErrorKind};
 
@@ -201,6 +201,71 @@ pub fn PlaybackRepeatButton(
     }
 }
 
+/// A native toggle button that mutes Playback without pausing it.
+#[component]
+pub fn PlaybackMuteButton(
+    controller: AudioPlayerController,
+    #[props(default = "Mute".to_string())] label: String,
+) -> Element {
+    let snapshot = controller.snapshot()();
+    let unsupported = matches!(
+        snapshot.source,
+        PlaybackSourceLifecycle::Failed(ref error)
+            if error.kind() == AudioErrorKind::UnsupportedPlatform
+    );
+
+    rsx! {
+        button {
+            class: "dioxus-audio dioxus-audio__control",
+            r#type: "button",
+            aria_label: label,
+            aria_pressed: if snapshot.muted { "true" } else { "false" },
+            disabled: unsupported,
+            onclick: move |_| controller.toggle_muted(),
+            if snapshot.muted {
+                VolumeX { size: 20 }
+            } else {
+                Volume2 { size: 20 }
+            }
+        }
+    }
+}
+
+/// A Controller-backed native slider for normalized Playback audibility.
+///
+/// The control is disabled when the Controller reports no level capability.
+/// A best-effort media-element capability does not guarantee perceived loudness
+/// on every browser.
+#[component]
+pub fn PlaybackAudibilitySlider(
+    controller: AudioPlayerController,
+    #[props(default = "Audibility level".to_string())] label: String,
+    #[props(default)] value_text: Option<String>,
+) -> Element {
+    let snapshot = controller.snapshot()();
+    let level = snapshot.audibility_level.value();
+    let value_text = value_text.unwrap_or_else(|| format!("{} percent", (level * 100.0).round()));
+
+    rsx! {
+        input {
+            class: "dioxus-audio dioxus-audio__audibility",
+            r#type: "range",
+            min: "0",
+            max: "1",
+            step: "0.01",
+            value: "{level}",
+            disabled: snapshot.audibility_capability == PlaybackAudibilityCapability::Unavailable,
+            aria_label: label,
+            aria_valuetext: value_text,
+            oninput: move |event| {
+                if let Ok(level) = event.value().parse::<f64>() {
+                    let _ = controller.set_audibility_level(level);
+                }
+            },
+        }
+    }
+}
+
 /// A native button that seeks Playback by a signed number of seconds.
 #[component]
 pub fn PlaybackSkipButton(
@@ -325,6 +390,9 @@ pub fn AudioPlayer(
             "data-readiness": readiness_state_name(snapshot.readiness),
             "data-play-failure": play_failure_name(snapshot.play_failure.as_ref()),
             "data-repeat": if snapshot.repeat { "true" } else { "false" },
+            "data-muted": if snapshot.muted { "true" } else { "false" },
+            "data-audibility-level": snapshot.audibility_level.value().to_string(),
+            "data-audibility-capability": audibility_capability_name(snapshot.audibility_capability),
             PlaybackSeekSlider { controller }
             div { class: "dioxus-audio__player-times",
                 span { "{format_time(position)}" }
@@ -336,6 +404,8 @@ pub fn AudioPlayer(
                 PlaybackPlayPauseButton { controller, on_request_audio }
                 PlaybackSkipButton { controller, seconds: 15.0 }
                 PlaybackRateButton { controller }
+                PlaybackMuteButton { controller }
+                PlaybackAudibilitySlider { controller }
                 PlaybackRepeatButton { controller }
             }
             if let PlaybackStatus::Failed(ref error) = status {
@@ -418,5 +488,13 @@ fn play_failure_name(failure: Option<&PlaybackPlayFailure>) -> &'static str {
         None => "none",
         Some(PlaybackPlayFailure::InteractionRequired(_)) => "interaction-required",
         Some(PlaybackPlayFailure::Unknown(_)) => "unknown",
+    }
+}
+
+fn audibility_capability_name(capability: PlaybackAudibilityCapability) -> &'static str {
+    match capability {
+        PlaybackAudibilityCapability::EffectiveGraphGain => "effective-graph-gain",
+        PlaybackAudibilityCapability::BestEffortMediaElement => "best-effort-media-element",
+        PlaybackAudibilityCapability::Unavailable => "unavailable",
     }
 }

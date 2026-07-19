@@ -312,12 +312,12 @@
   color: var(--dioxus-audio-primary-content, var(--color-primary-content, #ffffff));
 }
 
-.dioxus-audio__control:hover:not(:disabled),
+.dioxus-audio__control:hover:not(:disabled):not([aria-disabled="true"]),
 .dioxus-audio__rate:hover:not(:disabled) {
   background-color: var(--_dxa-base-200);
 }
 
-.dioxus-audio__control--primary:hover:not(:disabled) {
+.dioxus-audio__control--primary:hover:not(:disabled):not([aria-disabled="true"]) {
   filter: brightness(0.94);
   background-color: var(--_dxa-primary);
 }
@@ -328,7 +328,8 @@
   outline-offset: 2px;
 }
 
-.dioxus-audio__control:disabled {
+.dioxus-audio__control:disabled,
+.dioxus-audio__control[aria-disabled="true"] {
   cursor: not-allowed;
   opacity: 0.35;
 }
@@ -381,6 +382,26 @@
 }
 
 .dioxus-audio__record-action:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.55;
+}
+
+.dioxus-audio__record-action[aria-busy="true"]:disabled {
+  cursor: wait;
+}
+
+.dioxus-audio__rate:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.dioxus-audio__status-announcer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

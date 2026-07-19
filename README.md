@@ -85,6 +85,13 @@ captured bytes. Consumers that maintain their own retry queue can use
 `recorder.take_completed()` to move the recording out without cloning its
 audio buffer.
 
+For custom layouts, pass the same Recorder to `RecorderStartButton`,
+`RecorderCancelButton`, `RecorderPauseResumeButton`, `RecorderStopButton`, and
+`RecorderClearButton`. Each native button exposes command validity through its
+disabled state and accepts application-specific labels. Mount
+`RecorderStatusAnnouncer` when the application needs polite, coarse lifecycle
+announcements; it does not announce elapsed time or Analysis updates.
+
 Microphone capture requires a secure browser context. HTTPS, `localhost`, and
 `127.0.0.1` are normally accepted by browsers.
 
@@ -123,6 +130,13 @@ For custom controls, `use_audio_player` exposes a `PlaybackSnapshot` through
 play failure are independent facets: a play request remains `PlayPending` until
 the browser confirms `Playing`, and an interaction-required rejection leaves the
 current source usable for retry.
+
+The same Controller can drive independently arranged `PlaybackSeekSlider`,
+`PlaybackSkipButton`, `PlaybackPlayPauseButton`, and `PlaybackRateButton`
+components. Labels, signed skip amounts, and the rate cycle are configurable.
+The seek slider exposes source-time value text, which can be replaced with a
+localized `value_text`. `PlaybackStatusAnnouncer` is an optional polite live
+region for coarse lifecycle changes and never announces position continuously.
 
 ## Platform Support
 

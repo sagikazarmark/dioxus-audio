@@ -10,7 +10,7 @@ pub fn Recorder() -> Element {
         PageHeader {
             eyebrow: "Recording",
             title: "Capture, inspect, and replay",
-            intro: "A complete browser recording flow with input selection, permission state, live analysis, generated peaks, and playback of the finished capture.",
+            intro: "A complete browser recording flow with reusable native controls, input selection, permission state, live analysis, generated peaks, and playback of the finished capture.",
         }
         ExampleSection {
             title: "use_audio_recorder",

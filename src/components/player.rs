@@ -4,13 +4,251 @@ use dioxus::prelude::*;
 use dioxus_icons::lucide::{Pause, Play, RotateCcw, RotateCw};
 
 use super::AudioScrubber;
-use crate::AudioData;
 use crate::playback::{
-    PlaybackPlayFailure, PlaybackReadiness, PlaybackSourceLifecycle, PlaybackStatus,
-    PlaybackTransport, use_audio_player,
+    AudioPlayerController, PlaybackPlayFailure, PlaybackReadiness, PlaybackSourceLifecycle,
+    PlaybackStatus, PlaybackTransport, use_audio_player,
 };
+use crate::{AudioData, AudioErrorKind};
 
-const PLAYBACK_RATES: [f64; 3] = [1.0, 1.5, 2.0];
+/// Localizable messages emitted by [`PlaybackStatusAnnouncer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaybackAnnouncementLabels {
+    pub empty: String,
+    pub loading: String,
+    pub ready: String,
+    pub starting: String,
+    pub playing: String,
+    pub paused: String,
+    pub ended: String,
+    pub failed: String,
+}
+
+impl Default for PlaybackAnnouncementLabels {
+    fn default() -> Self {
+        Self {
+            empty: "No audio loaded".to_string(),
+            loading: "Audio loading".to_string(),
+            ready: "Audio ready".to_string(),
+            starting: "Playback starting".to_string(),
+            playing: "Audio playing".to_string(),
+            paused: "Audio paused".to_string(),
+            ended: "Playback ended".to_string(),
+            failed: "Playback failed".to_string(),
+        }
+    }
+}
+
+/// An optional polite live region for coarse Playback lifecycle changes.
+#[component]
+pub fn PlaybackStatusAnnouncer(
+    controller: AudioPlayerController,
+    #[props(default)] labels: PlaybackAnnouncementLabels,
+) -> Element {
+    let status = controller.status()();
+    let transport = controller.snapshot()().transport;
+    let message = if transport == PlaybackTransport::PlayPending {
+        labels.starting.as_str()
+    } else {
+        match status {
+            PlaybackStatus::Empty => labels.empty.as_str(),
+            PlaybackStatus::Loading => labels.loading.as_str(),
+            PlaybackStatus::Ready => labels.ready.as_str(),
+            PlaybackStatus::Playing => labels.playing.as_str(),
+            PlaybackStatus::Paused => labels.paused.as_str(),
+            PlaybackStatus::Ended => labels.ended.as_str(),
+            PlaybackStatus::Failed(_) => labels.failed.as_str(),
+        }
+    };
+
+    rsx! {
+        div {
+            class: "dioxus-audio dioxus-audio__status-announcer",
+            role: "status",
+            aria_live: "polite",
+            aria_atomic: "true",
+            "{message}"
+        }
+    }
+}
+
+/// A native button that plays or pauses a Playback Controller.
+///
+/// Supplying `on_request_audio` also makes the button usable while Playback is
+/// empty. The callback can load a source; Playback starts when that source is
+/// ready.
+#[component]
+pub fn PlaybackPlayPauseButton(
+    controller: AudioPlayerController,
+    #[props(default = "Play".to_string())] play_label: String,
+    #[props(default = "Pause".to_string())] pause_label: String,
+    #[props(default)] on_request_audio: Option<EventHandler<()>>,
+) -> Element {
+    let snapshot = controller.snapshot()();
+    let mut play_requested = use_signal(|| false);
+    let requested = play_requested();
+    let pending = snapshot.transport == PlaybackTransport::PlayPending;
+    let playing = snapshot.transport == PlaybackTransport::Playing;
+    let pausable = pending || playing;
+    let empty = matches!(snapshot.source, PlaybackSourceLifecycle::Empty);
+    let can_request_audio = on_request_audio.is_some();
+    let disabled = match &snapshot.source {
+        PlaybackSourceLifecycle::Empty => !can_request_audio,
+        PlaybackSourceLifecycle::Loading => !requested,
+        PlaybackSourceLifecycle::Playable => false,
+        PlaybackSourceLifecycle::Failed(_) => true,
+    };
+    let busy = pending
+        || (requested
+            && matches!(
+                snapshot.source,
+                PlaybackSourceLifecycle::Empty | PlaybackSourceLifecycle::Loading
+            ));
+    let aria_label = if pausable { pause_label } else { play_label };
+
+    use_effect(move || {
+        if !play_requested() {
+            return;
+        }
+
+        match controller.snapshot()().source {
+            PlaybackSourceLifecycle::Playable => {
+                if controller.play().is_ok() {
+                    play_requested.set(false);
+                }
+            }
+            PlaybackSourceLifecycle::Failed(_) => play_requested.set(false),
+            PlaybackSourceLifecycle::Empty | PlaybackSourceLifecycle::Loading => {}
+        }
+    });
+
+    rsx! {
+        button {
+            class: "dioxus-audio dioxus-audio__control dioxus-audio__control--primary",
+            r#type: "button",
+            aria_label,
+            aria_busy: busy,
+            aria_disabled: requested
+                && matches!(snapshot.source, PlaybackSourceLifecycle::Loading),
+            disabled,
+            onclick: move |_| {
+                if empty {
+                    if let Some(on_request_audio) = on_request_audio {
+                        play_requested.set(true);
+                        on_request_audio.call(());
+                    }
+                } else if pausable {
+                    let _ = controller.pause();
+                } else if !busy {
+                    let _ = controller.play();
+                }
+            },
+            if pausable {
+                Pause { size: 28 }
+            } else {
+                Play { size: 28 }
+            }
+        }
+    }
+}
+
+/// A native button that seeks Playback by a signed number of seconds.
+#[component]
+pub fn PlaybackSkipButton(
+    controller: AudioPlayerController,
+    #[props(default = 15.0)] seconds: f64,
+    #[props(default)] label: Option<String>,
+) -> Element {
+    let playable = matches!(
+        controller.snapshot()().source,
+        PlaybackSourceLifecycle::Playable
+    );
+    let valid = seconds.is_finite() && seconds != 0.0;
+    let aria_label = label.unwrap_or_else(|| skip_label(seconds));
+
+    rsx! {
+        button {
+            class: "dioxus-audio dioxus-audio__control",
+            r#type: "button",
+            aria_label,
+            disabled: !playable || !valid,
+            onclick: move |_| controller.skip(seconds),
+            if seconds < 0.0 {
+                RotateCcw { size: 20 }
+            } else {
+                RotateCw { size: 20 }
+            }
+        }
+    }
+}
+
+/// A native button that cycles through configurable Playback rates.
+#[component]
+pub fn PlaybackRateButton(
+    controller: AudioPlayerController,
+    #[props(default = vec![1.0, 1.5, 2.0])] rates: Vec<f64>,
+    #[props(default = "Playback speed".to_string())] label: String,
+) -> Element {
+    let rate = controller.rate()();
+    let rates: Vec<_> = rates
+        .into_iter()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .collect();
+    let next_rate = if rates.is_empty() {
+        None
+    } else if let Some(current) = rates
+        .iter()
+        .position(|candidate| (*candidate - rate).abs() < f64::EPSILON)
+    {
+        Some(rates[(current + 1) % rates.len()])
+    } else {
+        rates.first().copied()
+    };
+    let unsupported = matches!(
+        controller.snapshot()().source,
+        PlaybackSourceLifecycle::Failed(ref error)
+            if error.kind() == AudioErrorKind::UnsupportedPlatform
+    );
+    let rate_text = rate.to_string();
+    let aria_label = format!("{label}: {rate_text}x");
+
+    rsx! {
+        button {
+            class: "dioxus-audio dioxus-audio__rate",
+            r#type: "button",
+            aria_label,
+            disabled: unsupported || next_rate.is_none(),
+            onclick: move |_| {
+                if let Some(next_rate) = next_rate {
+                    let _ = controller.set_rate(next_rate);
+                }
+            },
+            "{rate_text}x"
+        }
+    }
+}
+
+/// A Controller-backed native Playback position slider.
+#[component]
+pub fn PlaybackSeekSlider(
+    controller: AudioPlayerController,
+    #[props(default = "Seek audio".to_string())] label: String,
+    #[props(default)] value_text: Option<String>,
+) -> Element {
+    let snapshot = controller.snapshot()();
+    let position = controller.position()().as_secs_f64();
+    let duration = controller.duration()().as_secs_f64();
+
+    rsx! {
+        AudioScrubber {
+            position_secs: position,
+            duration_secs: duration,
+            disabled: !matches!(snapshot.source, PlaybackSourceLifecycle::Playable),
+            aria_label: label,
+            value_text,
+            on_seek: move |seconds| controller.seek(Duration::from_secs_f64(seconds)),
+        }
+    }
+}
 
 #[component]
 pub fn AudioPlayer(
@@ -18,8 +256,6 @@ pub fn AudioPlayer(
     on_request_audio: EventHandler<()>,
     #[props(default = 0.0)] duration_secs: f64,
 ) -> Element {
-    let mut play_requested = use_signal(|| false);
-    let source_input = use_memo(use_reactive!(|(source,)| source));
     let controller = use_audio_player(
         source,
         Duration::from_secs_f64(finite_non_negative(duration_secs)),
@@ -28,21 +264,7 @@ pub fn AudioPlayer(
     let snapshot = controller.snapshot()();
     let position = controller.position()().as_secs_f64();
     let duration = controller.duration()().as_secs_f64();
-    let rate = controller.rate()();
-    let rate_label = format!("Playback speed: {rate}x");
-    let has_source = source.read().is_some();
-    let playing = matches!(status, PlaybackStatus::Playing);
     let remaining = (duration - position).max(0.0);
-
-    use_effect(move || {
-        if play_requested()
-            && source_input().read().is_some()
-            && matches!(controller.status()(), PlaybackStatus::Ready)
-            && controller.play().is_ok()
-        {
-            play_requested.set(false);
-        }
-    });
 
     rsx! {
         div {
@@ -52,67 +274,16 @@ pub fn AudioPlayer(
             "data-transport": transport_state_name(snapshot.transport),
             "data-readiness": readiness_state_name(snapshot.readiness),
             "data-play-failure": play_failure_name(snapshot.play_failure.as_ref()),
-            AudioScrubber {
-                position_secs: position,
-                duration_secs: duration,
-                disabled: matches!(status, PlaybackStatus::Empty | PlaybackStatus::Loading),
-                on_seek: move |seconds| controller.seek(Duration::from_secs_f64(seconds)),
-            }
+            PlaybackSeekSlider { controller }
             div { class: "dioxus-audio__player-times",
                 span { "{format_time(position)}" }
                 span { "-{format_time(remaining)}" }
             }
             div { class: "dioxus-audio__player-controls",
-                button {
-                    class: "dioxus-audio__control",
-                    r#type: "button",
-                    aria_label: "Skip back 15 seconds",
-                    disabled: !has_source,
-                    onclick: move |_| controller.skip(-15.0),
-                    RotateCcw { size: 20 }
-                }
-                button {
-                    class: "dioxus-audio__control dioxus-audio__control--primary",
-                    r#type: "button",
-                    aria_label: if playing { "Pause" } else { "Play" },
-                    disabled: has_source && matches!(status, PlaybackStatus::Empty | PlaybackStatus::Loading),
-                    onclick: move |_| {
-                        if !has_source {
-                            play_requested.set(true);
-                            on_request_audio.call(());
-                        } else if playing {
-                            let _ = controller.pause();
-                        } else {
-                            let _ = controller.play();
-                        }
-                    },
-                    if playing {
-                        Pause { size: 28 }
-                    } else {
-                        Play { size: 28 }
-                    }
-                }
-                button {
-                    class: "dioxus-audio__control",
-                    r#type: "button",
-                    aria_label: "Skip forward 15 seconds",
-                    disabled: !has_source,
-                    onclick: move |_| controller.skip(15.0),
-                    RotateCw { size: 20 }
-                }
-                button {
-                    class: "dioxus-audio__rate",
-                    r#type: "button",
-                    aria_label: rate_label,
-                    onclick: move |_| {
-                        let current = PLAYBACK_RATES
-                            .iter()
-                            .position(|candidate| (*candidate - rate).abs() < f64::EPSILON)
-                            .unwrap_or(0);
-                        let _ = controller.set_rate(PLAYBACK_RATES[(current + 1) % PLAYBACK_RATES.len()]);
-                    },
-                    "{rate}x"
-                }
+                PlaybackSkipButton { controller, seconds: -15.0 }
+                PlaybackPlayPauseButton { controller, on_request_audio }
+                PlaybackSkipButton { controller, seconds: 15.0 }
+                PlaybackRateButton { controller }
             }
             if let PlaybackStatus::Failed(ref error) = status {
                 div {
@@ -122,6 +293,16 @@ pub fn AudioPlayer(
                 }
             }
         }
+    }
+}
+
+fn skip_label(seconds: f64) -> String {
+    let amount = seconds.abs().to_string();
+    let unit = if amount == "1" { "second" } else { "seconds" };
+    if seconds < 0.0 {
+        format!("Skip back {amount} {unit}")
+    } else {
+        format!("Skip forward {amount} {unit}")
     }
 }
 

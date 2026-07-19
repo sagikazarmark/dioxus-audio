@@ -1,7 +1,9 @@
 use dioxus::prelude::*;
 use dioxus_audio::components::{
     AudioInputSelector, AudioPlayer, LevelMeter, LiveWaveform, MicrophoneStatusIndicator,
-    RecorderControls, SpectrumVisualizer, WaveformPreview,
+    RecorderAnnouncementLabels, RecorderCancelButton, RecorderClearButton, RecorderControls,
+    RecorderPauseResumeButton, RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton,
+    SpectrumVisualizer, WaveformPreview,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
 use dioxus_audio::recorder::{RecorderOptions, RecorderStatus, use_audio_recorder};
@@ -14,6 +16,7 @@ use crate::components::StatusChip;
 pub fn RecorderExample() -> Element {
     let devices = use_audio_input_devices();
     let recorder = use_audio_recorder(RecorderOptions::default(), devices.selected().into());
+    let custom_recorder = use_audio_recorder(RecorderOptions::default(), devices.selected().into());
     let mut completed = use_signal(|| None::<RecordedAudio>);
     let mut source = use_signal(|| None::<AudioData>);
 
@@ -27,16 +30,19 @@ pub fn RecorderExample() -> Element {
     });
 
     let status = recorder.status()();
-    let active = matches!(
-        status,
-        RecorderStatus::RequestingPermission
-            | RecorderStatus::Recording
-            | RecorderStatus::Paused
-            | RecorderStatus::Stopping
-    );
+    let custom_status = custom_recorder.status()();
+    let active = recorder_active(&status) || recorder_active(&custom_status);
     let permission = devices.permission()();
     let recording = completed.read().clone();
     let elapsed = format_duration(recorder.elapsed()().as_secs_f64());
+    let custom_labels = RecorderAnnouncementLabels {
+        idle: "Custom recorder idle".to_string(),
+        requesting: "Custom recorder requesting microphone access".to_string(),
+        recording: "Custom recording active".to_string(),
+        paused: "Custom recording on hold".to_string(),
+        stopping: "Custom recording finishing".to_string(),
+        failed: "Custom recording failed".to_string(),
+    };
 
     rsx! {
         div { class: "grid gap-5",
@@ -89,6 +95,41 @@ pub fn RecorderExample() -> Element {
             }
             LevelMeter { analyser: recorder.analyser() }
             RecorderControls { recorder }
+            div {
+                class: "rounded-2xl border border-base-300 bg-base-100 p-4",
+                role: "group",
+                aria_label: "Independent recorder controls",
+                p { class: "mb-3 text-xs font-semibold uppercase tracking-wider text-base-content/45",
+                    "Independent controls"
+                }
+                RecorderStatusAnnouncer { recorder: custom_recorder, labels: custom_labels }
+                div { class: "flex flex-wrap items-center justify-center gap-3",
+                    RecorderStartButton {
+                        recorder: custom_recorder,
+                        label: "Begin custom recording".to_string(),
+                        completed_label: "Clear custom recorded audio first".to_string(),
+                    }
+                    RecorderCancelButton {
+                        recorder: custom_recorder,
+                        request_label: "Abort custom microphone request".to_string(),
+                        recording_label: "Discard custom recording".to_string(),
+                    }
+                    RecorderPauseResumeButton {
+                        recorder: custom_recorder,
+                        pause_label: "Hold custom recording".to_string(),
+                        resume_label: "Continue custom recording".to_string(),
+                    }
+                    RecorderStopButton {
+                        recorder: custom_recorder,
+                        stop_label: "Finish custom recording".to_string(),
+                        stopping_label: "Custom recording is finishing".to_string(),
+                    }
+                    RecorderClearButton {
+                        recorder: custom_recorder,
+                        label: "Clear custom recorded audio".to_string(),
+                    }
+                }
+            }
 
             if let Some(recording) = recording {
                 div {
@@ -132,4 +173,14 @@ pub fn RecorderExample() -> Element {
 fn format_duration(seconds: f64) -> String {
     let total_seconds = seconds.max(0.0) as u64;
     format!("{}:{:02}", total_seconds / 60, total_seconds % 60)
+}
+
+fn recorder_active(status: &RecorderStatus) -> bool {
+    matches!(
+        status,
+        RecorderStatus::RequestingPermission
+            | RecorderStatus::Recording
+            | RecorderStatus::Paused
+            | RecorderStatus::Stopping
+    )
 }

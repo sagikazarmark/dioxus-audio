@@ -10,7 +10,7 @@ pub fn Playback() -> Element {
         PageHeader {
             eyebrow: "Playback",
             title: "Load audio only when it is needed",
-            intro: "The player manages browser object URLs, seeking, skip controls, playback rate, and source replacement.",
+            intro: "Use the composed Playback control or arrange native controls around the same Controller with application-specific labels, skip amounts, and rates.",
         }
         ExampleSection {
             title: "AudioPlayer",

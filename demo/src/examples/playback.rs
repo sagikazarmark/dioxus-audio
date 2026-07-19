@@ -1,14 +1,20 @@
 use std::f32::consts::TAU;
+use std::time::Duration;
 
 use dioxus::prelude::*;
 use dioxus_audio::AudioData;
-use dioxus_audio::components::{AudioPlayer, WaveformPreview};
+use dioxus_audio::components::{
+    AudioPlayer, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackSeekSlider,
+    PlaybackSkipButton, PlaybackStatusAnnouncer, WaveformPreview,
+};
+use dioxus_audio::playback::use_audio_player;
 
 /// Lazily generate a two-second WAV tone when the player asks for its bytes.
 #[component]
 pub fn PlaybackExample() -> Element {
     let mut source = use_signal(|| None::<AudioData>);
     let loaded = source.read().is_some();
+    let custom_controller = use_audio_player(source.into(), Duration::from_secs(2));
 
     rsx! {
         div { class: "grid gap-4",
@@ -22,6 +28,42 @@ pub fn PlaybackExample() -> Element {
                 source,
                 duration_secs: 2.0,
                 on_request_audio: move |_| source.set(Some(sine_wave(440.0))),
+            }
+            div {
+                class: "rounded-2xl border border-base-300 bg-base-100 p-4",
+                role: "group",
+                aria_label: "Independent playback controls",
+                p { class: "mb-3 text-xs font-semibold uppercase tracking-wider text-base-content/45",
+                    "Independent controls"
+                }
+                PlaybackStatusAnnouncer { controller: custom_controller }
+                PlaybackSeekSlider {
+                    controller: custom_controller,
+                    label: "Custom tone position".to_string(),
+                }
+                div { class: "mt-2 flex flex-wrap items-center justify-center gap-3",
+                    PlaybackSkipButton {
+                        controller: custom_controller,
+                        seconds: -0.5,
+                        label: "Rewind custom tone by half a second".to_string(),
+                    }
+                    PlaybackPlayPauseButton {
+                        controller: custom_controller,
+                        play_label: "Play custom tone".to_string(),
+                        pause_label: "Pause custom tone".to_string(),
+                        on_request_audio: move |_| source.set(Some(sine_wave(440.0))),
+                    }
+                    PlaybackSkipButton {
+                        controller: custom_controller,
+                        seconds: 0.5,
+                        label: "Advance custom tone by half a second".to_string(),
+                    }
+                    PlaybackRateButton {
+                        controller: custom_controller,
+                        rates: vec![0.75, 1.0, 1.25],
+                        label: "Listening rate".to_string(),
+                    }
+                }
             }
             div { class: "flex items-center justify-between gap-3 text-sm text-base-content/60",
                 span {

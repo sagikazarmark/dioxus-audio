@@ -8,6 +8,16 @@ test("independent playback controls keep focus and configuration", async ({
   const controls = page.getByRole("group", {
     name: "Independent playback controls",
   });
+  const repeat = controls.getByRole("button", {
+    name: "Repeat custom tone",
+  });
+  await expect(repeat).toHaveAttribute("aria-pressed", "false");
+  await repeat.focus();
+  await repeat.press("Space");
+  await expect(repeat).toBeFocused();
+  await expect(repeat).toHaveAttribute("aria-pressed", "true");
+  await repeat.press("Space");
+  await expect(repeat).toHaveAttribute("aria-pressed", "false");
 
   const play = controls.getByRole("button", {
     name: "Play custom tone",
@@ -53,6 +63,12 @@ test("independent playback controls keep focus and configuration", async ({
   await skip.focus();
   await skip.press("Enter");
   await expect(slider).toHaveValue("0.5");
+
+  const stop = controls.getByRole("button", { name: "Stop custom tone" });
+  await stop.focus();
+  await stop.press("Enter");
+  await expect(slider).toHaveValue("0");
+  await expect(stop).toBeDisabled();
 
   await slider.focus();
   await slider.press("End");

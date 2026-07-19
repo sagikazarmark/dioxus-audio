@@ -3,6 +3,7 @@ import { expect, test } from "./fixtures";
 type PlaybackTestWindow = typeof globalThis & {
   pendingPlaybackElement?: HTMLMediaElement;
   rejectPendingPlayback?: () => void;
+  resolvePendingPlayback?: () => void;
 };
 
 test("generated audio can be played, paused, and resumed", async ({
@@ -125,6 +126,116 @@ test("a rejected playback attempt is visible and can be retried", async ({
     );
   });
   await expect(player).toHaveAttribute("data-transport", "playing");
+});
+
+test("stop resets pending playback and ignores its late outcome", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback", "Load audio only when it is needed");
+  await page.evaluate(() => {
+    HTMLMediaElement.prototype.play = function () {
+      const testWindow = window as PlaybackTestWindow;
+      testWindow.pendingPlaybackElement = this;
+      return new Promise((resolve) => {
+        testWindow.resolvePendingPlayback = () => resolve();
+      });
+    };
+  });
+
+  const player = page.locator(".dioxus-audio__player");
+  const slider = player.getByRole("slider", { name: "Seek audio" });
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await expect(player).toHaveAttribute("data-transport", "play-pending");
+
+  await page.evaluate(() => {
+    const element = (window as PlaybackTestWindow).pendingPlaybackElement;
+    if (element) {
+      element.currentTime = 1;
+      element.dispatchEvent(new Event("timeupdate"));
+    }
+  });
+  await expect(slider).toHaveValue("1");
+
+  const stop = page.getByRole("button", { name: "Stop", exact: true });
+  await stop.click();
+  await expect(player).toHaveAttribute("data-transport", "idle");
+  await expect(slider).toHaveValue("0");
+  await expect(stop).toBeDisabled();
+
+  await page.evaluate(() => {
+    const testWindow = window as PlaybackTestWindow;
+    const element = testWindow.pendingPlaybackElement;
+    if (element) {
+      Object.defineProperty(element, "paused", {
+        configurable: true,
+        value: false,
+      });
+      testWindow.resolvePendingPlayback?.();
+      element.currentTime = 1.5;
+      element.dispatchEvent(new Event("playing"));
+      element.dispatchEvent(new Event("timeupdate"));
+      element.dispatchEvent(new Event("pause"));
+    }
+  });
+  await expect(player).toHaveAttribute("data-transport", "idle");
+  await expect(slider).toHaveValue("0");
+  await expect(page.getByRole("alert")).not.toBeVisible();
+});
+
+test("whole-source repeat loops and persists through replacement and unload", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback", "Load audio only when it is needed");
+  await page.evaluate(() => {
+    const nativePlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function () {
+      (window as PlaybackTestWindow).pendingPlaybackElement = this;
+      return nativePlay.call(this);
+    };
+  });
+
+  const player = page.locator(".dioxus-audio__player");
+  const repeat = page.getByRole("button", { name: "Repeat", exact: true });
+  await expect(repeat).toHaveAttribute("aria-pressed", "false");
+  await repeat.focus();
+  await repeat.press("Space");
+  await expect(repeat).toBeFocused();
+  await expect(repeat).toHaveAttribute("aria-pressed", "true");
+  await expect(player).toHaveAttribute("data-repeat", "true");
+
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await expect(player).toHaveAttribute("data-transport", "playing");
+  await page.evaluate(() => {
+    const element = (window as PlaybackTestWindow).pendingPlaybackElement;
+    if (element) {
+      element.playbackRate = 4;
+      element.currentTime = Math.max(0, element.duration - 0.2);
+    }
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as PlaybackTestWindow).pendingPlaybackElement?.currentTime ??
+          Infinity,
+      ),
+    )
+    .toBeLessThan(1);
+  await expect(player).toHaveAttribute("data-transport", "playing");
+
+  await page.getByRole("button", { name: "Replace", exact: true }).click();
+  await expect(repeat).toHaveAttribute("aria-pressed", "true");
+  await expect(player).toHaveAttribute("data-repeat", "true");
+
+  await page.getByRole("button", { name: "Unload", exact: true }).click();
+  await expect(player).toHaveAttribute("data-source", "empty");
+  await expect(repeat).toHaveAttribute("aria-pressed", "true");
+  await repeat.press("Space");
+  await expect(repeat).toBeFocused();
+  await expect(repeat).toHaveAttribute("aria-pressed", "false");
+  await expect(player).toHaveAttribute("data-repeat", "false");
 });
 
 test("replacement and unload ignore stale playback outcomes", async ({

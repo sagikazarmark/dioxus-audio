@@ -806,6 +806,7 @@ function teachingControls(page: Page): TeachingControl[] {
     teachingControl(studio.getByRole("button", { name: "Denied" })),
     packageControl(studio.getByRole("button", { name: "Play", exact: true })),
     packageControl(studio.getByRole("button", { name: "Playback speed: 1x" })),
+    packageControl(studio.getByRole("button", { name: "Repeat", exact: true })),
     ...sourceRecipeControls(regions.studio, 2),
     ...clipEditorControls(citrus),
     ...clipEditorControls(midnight),
@@ -815,6 +816,9 @@ function teachingControls(page: Page): TeachingControl[] {
     ),
     packageControl(
       regions.fallback.getByRole("button", { name: "Playback speed: 1x" }),
+    ),
+    packageControl(
+      regions.fallback.getByRole("button", { name: "Repeat", exact: true }),
     ),
     ...sourceRecipeControls(regions.fallback, 1),
   ];
@@ -849,17 +853,21 @@ function clipEditorControls(editor: Locator): TeachingControl[] {
   return [
     packageControl(editor.getByRole("slider", { name: "Selection start" })),
     packageControl(editor.getByRole("slider", { name: "Selection end" })),
-    ...playerControls(editor).map(packageControl),
+    ...playerControls(editor, false).map(packageControl),
   ];
 }
 
-function playerControls(example: Locator): Locator[] {
+function playerControls(example: Locator, includeStop = true): Locator[] {
   return [
     example.getByRole("slider", { name: "Seek" }),
     example.getByRole("button", { name: "Skip back 15 seconds" }),
+    ...(includeStop
+      ? [example.getByRole("button", { name: "Stop", exact: true })]
+      : []),
     example.getByRole("button", { name: "Play", exact: true }),
     example.getByRole("button", { name: "Skip forward 15 seconds" }),
     example.getByRole("button", { name: /^Playback speed:/ }),
+    example.getByRole("button", { name: "Repeat", exact: true }),
   ];
 }
 

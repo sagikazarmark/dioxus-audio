@@ -142,6 +142,79 @@ fn play_cannot_be_requested_while_pending_or_playing() {
 }
 
 #[test]
+fn stop_resets_every_non_idle_playback_state() {
+    for initial_transport in [
+        PlaybackTransport::PlayPending,
+        PlaybackTransport::Playing,
+        PlaybackTransport::Paused,
+        PlaybackTransport::Ended,
+    ] {
+        let mut playback = PlaybackLifecycle::default();
+        playback.loaded();
+        playback.request_play().unwrap();
+        if initial_transport != PlaybackTransport::PlayPending {
+            playback.playing();
+        }
+        if initial_transport == PlaybackTransport::Paused {
+            playback.paused();
+        } else if initial_transport == PlaybackTransport::Ended {
+            playback.ended();
+        }
+        let readiness = playback.readiness();
+
+        playback.stop().unwrap();
+
+        assert_eq!(
+            playback.status(),
+            &PlaybackStatus::Ready,
+            "status after stopping {initial_transport:?}"
+        );
+        assert_eq!(playback.source(), &PlaybackSourceLifecycle::Playable);
+        assert_eq!(playback.transport(), PlaybackTransport::Idle);
+        assert_eq!(playback.readiness(), readiness);
+        assert_eq!(playback.play_failure(), None);
+    }
+}
+
+#[test]
+fn stopped_playback_ignores_superseded_transport_outcomes() {
+    let mut playback = PlaybackLifecycle::default();
+    playback.loaded();
+    playback.request_play().unwrap();
+    playback.stop().unwrap();
+    let stopped = playback.snapshot().clone();
+
+    playback.playing();
+    playback.paused();
+    playback.ended();
+    playback.play_rejected(PlaybackPlayFailure::Unknown(AudioError::new(
+        AudioErrorKind::PlaybackFailure,
+        "late rejection",
+    )));
+
+    assert_eq!(playback.snapshot(), &stopped);
+    assert_eq!(playback.status(), &PlaybackStatus::Ready);
+}
+
+#[test]
+fn repeat_preference_survives_source_replacement_and_unload() {
+    let mut playback = PlaybackLifecycle::default();
+    assert!(!playback.repeat());
+
+    playback.set_repeat(true);
+    playback.loading();
+    playback.loaded();
+    playback.stop().unwrap();
+    assert!(playback.repeat());
+
+    playback.unload();
+    assert!(playback.repeat());
+
+    playback.toggle_repeat();
+    assert!(!playback.repeat());
+}
+
+#[test]
 fn seeking_away_from_the_end_preserves_the_requested_position() {
     let mut playback = PlaybackLifecycle::default();
     playback.loaded();

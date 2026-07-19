@@ -67,6 +67,9 @@ pub(super) fn use_web_audio_player(
             ) {
                 Ok(resource) => {
                     resource.element.set_playback_rate(*rate.peek());
+                    resource
+                        .element
+                        .set_loop(runtime.borrow().lifecycle.repeat());
                     runtime.borrow_mut().resource = Some(resource);
                 }
                 Err(error) => {
@@ -139,6 +142,16 @@ pub(super) fn use_web_audio_player(
                 || runtime_ref.generation != generation
                 || runtime_ref.play_generation != play_generation
             {
+                let should_pause = runtime_ref.owner_active
+                    && runtime_ref.generation == generation
+                    && matches!(
+                        runtime_ref.lifecycle.transport(),
+                        PlaybackTransport::Idle | PlaybackTransport::Paused
+                    );
+                drop(runtime_ref);
+                if should_pause {
+                    let _ = element.pause();
+                }
                 return;
             }
             drop(runtime_ref);
@@ -151,6 +164,33 @@ pub(super) fn use_web_audio_player(
             }
             publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
         });
+        Ok(())
+    });
+
+    let runtime_for_stop = runtime.clone();
+    let stop: Callback<(), Result<(), PlaybackCommandError>> = use_callback(move |()| {
+        let element = {
+            let runtime = runtime_for_stop.borrow();
+            if runtime.lifecycle.source() != &PlaybackSourceLifecycle::Playable {
+                return Err(PlaybackCommandError("audio is not loaded"));
+            }
+            runtime
+                .resource
+                .as_ref()
+                .map(|resource| resource.element.clone())
+                .ok_or(PlaybackCommandError("audio is not loaded"))?
+        };
+        element
+            .pause()
+            .map_err(|_| PlaybackCommandError("browser rejected stop"))?;
+        {
+            let mut runtime = runtime_for_stop.borrow_mut();
+            runtime.play_generation = runtime.play_generation.wrapping_add(1);
+            runtime.lifecycle.stop()?;
+        }
+        element.set_current_time(0.0);
+        position.set(Duration::ZERO);
+        publish_lifecycle(&runtime_for_stop.borrow().lifecycle, status, snapshot);
         Ok(())
     });
 
@@ -211,6 +251,16 @@ pub(super) fn use_web_audio_player(
             Ok(())
         });
 
+    let runtime_for_repeat = runtime.clone();
+    let set_repeat = use_callback(move |repeat: bool| {
+        let mut runtime = runtime_for_repeat.borrow_mut();
+        runtime.lifecycle.set_repeat(repeat);
+        if let Some(resource) = runtime.resource.as_ref() {
+            resource.element.set_loop(repeat);
+        }
+        publish_lifecycle(&runtime.lifecycle, status, snapshot);
+    });
+
     AudioPlayerController {
         status: status.into(),
         snapshot: snapshot.into(),
@@ -219,9 +269,11 @@ pub(super) fn use_web_audio_player(
         rate: rate.into(),
         play,
         pause,
+        stop,
         seek,
         skip,
         set_rate,
+        set_repeat,
     }
 }
 
@@ -359,8 +411,11 @@ impl WebPlayer {
         let on_time = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_time.in_scope(dioxus_scope, || {
                 let value = element_for_time.current_time();
-                with_current_runtime(&runtime_for_time, generation, |_| {
-                    if value.is_finite() && value >= 0.0 {
+                with_current_runtime(&runtime_for_time, generation, |runtime| {
+                    if runtime.lifecycle.transport() != PlaybackTransport::Idle
+                        && value.is_finite()
+                        && value >= 0.0
+                    {
                         position.set(Duration::from_secs_f64(value));
                     }
                 });

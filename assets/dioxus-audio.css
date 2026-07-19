@@ -283,6 +283,7 @@
 
 .dioxus-audio__player-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: center;
   gap: 0.75rem;
@@ -303,6 +304,11 @@
   color: var(--_dxa-content);
   font: inherit;
   cursor: pointer;
+}
+
+.dioxus-audio__control[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--_dxa-primary) 16%, transparent);
+  color: var(--_dxa-primary);
 }
 
 .dioxus-audio__control--primary {

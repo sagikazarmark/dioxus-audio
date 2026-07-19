@@ -79,6 +79,8 @@ pub struct PlaybackSnapshot {
     pub transport: PlaybackTransport,
     pub readiness: PlaybackReadiness,
     pub play_failure: Option<PlaybackPlayFailure>,
+    /// Whole-source repeat preference, retained across source replacement and unload.
+    pub repeat: bool,
 }
 
 impl Default for PlaybackSnapshot {
@@ -88,6 +90,7 @@ impl Default for PlaybackSnapshot {
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::Unavailable,
             play_failure: None,
+            repeat: false,
         }
     }
 }
@@ -143,13 +146,27 @@ impl PlaybackLifecycle {
         self.snapshot.play_failure.as_ref()
     }
 
+    pub fn repeat(&self) -> bool {
+        self.snapshot.repeat
+    }
+
+    pub fn set_repeat(&mut self, repeat: bool) {
+        self.snapshot.repeat = repeat;
+    }
+
+    pub fn toggle_repeat(&mut self) {
+        self.snapshot.repeat = !self.snapshot.repeat;
+    }
+
     pub fn loading(&mut self) {
+        let repeat = self.snapshot.repeat;
         self.status = PlaybackStatus::Loading;
         self.snapshot = PlaybackSnapshot {
             source: PlaybackSourceLifecycle::Loading,
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::LoadingMetadata,
             play_failure: None,
+            repeat,
         };
     }
 
@@ -220,6 +237,18 @@ impl PlaybackLifecycle {
         }
     }
 
+    /// Return a loaded source to its ready, idle state.
+    pub fn stop(&mut self) -> Result<(), PlaybackCommandError> {
+        if !matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable) {
+            return Err(PlaybackCommandError("audio is not loaded"));
+        }
+
+        self.status = PlaybackStatus::Ready;
+        self.snapshot.transport = PlaybackTransport::Idle;
+        self.snapshot.play_failure = None;
+        Ok(())
+    }
+
     pub fn ended(&mut self) {
         if self.snapshot.transport != PlaybackTransport::Playing {
             return;
@@ -261,18 +290,24 @@ impl PlaybackLifecycle {
     }
 
     pub fn failed(&mut self, error: AudioError) {
+        let repeat = self.snapshot.repeat;
         self.status = PlaybackStatus::Failed(error.clone());
         self.snapshot = PlaybackSnapshot {
             source: PlaybackSourceLifecycle::Failed(error),
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::Unavailable,
             play_failure: None,
+            repeat,
         };
     }
 
     pub fn unload(&mut self) {
+        let repeat = self.snapshot.repeat;
         self.status = PlaybackStatus::Empty;
-        self.snapshot = PlaybackSnapshot::default();
+        self.snapshot = PlaybackSnapshot {
+            repeat,
+            ..Default::default()
+        };
     }
 }
 
@@ -293,9 +328,11 @@ pub struct AudioPlayerController {
     rate: ReadSignal<f64>,
     play: Callback<(), Result<(), PlaybackCommandError>>,
     pause: Callback<(), Result<(), PlaybackCommandError>>,
+    stop: Callback<(), Result<(), PlaybackCommandError>>,
     seek: Callback<Duration>,
     skip: Callback<f64>,
     set_rate: Callback<f64, Result<(), PlaybackCommandError>>,
+    set_repeat: Callback<bool>,
 }
 
 impl AudioPlayerController {
@@ -319,12 +356,21 @@ impl AudioPlayerController {
         self.rate
     }
 
+    pub fn repeat(self) -> bool {
+        self.snapshot.read().repeat
+    }
+
     pub fn play(self) -> Result<(), PlaybackCommandError> {
         self.play.call(())
     }
 
     pub fn pause(self) -> Result<(), PlaybackCommandError> {
         self.pause.call(())
+    }
+
+    /// Stop Playback atomically and reset its observable position.
+    pub fn stop(self) -> Result<(), PlaybackCommandError> {
+        self.stop.call(())
     }
 
     pub fn seek(self, position: Duration) {
@@ -337,6 +383,16 @@ impl AudioPlayerController {
 
     pub fn set_rate(self, rate: f64) -> Result<(), PlaybackCommandError> {
         self.set_rate.call(rate)
+    }
+
+    /// Set the whole-source repeat preference.
+    pub fn set_repeat(self, repeat: bool) {
+        self.set_repeat.call(repeat);
+    }
+
+    /// Toggle the whole-source repeat preference.
+    pub fn toggle_repeat(self) {
+        self.set_repeat(!self.repeat());
     }
 }
 
@@ -367,12 +423,14 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
     use_effect(move || {
         duration.set(initial_duration());
         let error = AudioError::unsupported();
+        let repeat = snapshot.peek().repeat;
         status.set(PlaybackStatus::Failed(error.clone()));
         snapshot.set(PlaybackSnapshot {
             source: PlaybackSourceLifecycle::Failed(error),
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::Unavailable,
             play_failure: None,
+            repeat,
         });
     });
     let unsupported: Callback<(), Result<(), PlaybackCommandError>> =
@@ -381,6 +439,10 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
     let skip = use_callback(|_: f64| {});
     let set_rate: Callback<f64, Result<(), PlaybackCommandError>> =
         use_callback(|_: f64| Err(PlaybackCommandError("audio playback is unsupported")));
+    let mut snapshot_for_repeat = snapshot;
+    let set_repeat = use_callback(move |repeat: bool| {
+        snapshot_for_repeat.write().repeat = repeat;
+    });
     AudioPlayerController {
         status: status.into(),
         snapshot: snapshot.into(),
@@ -389,8 +451,10 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
         rate: rate.into(),
         play: unsupported,
         pause: unsupported,
+        stop: unsupported,
         seek,
         skip,
         set_rate,
+        set_repeat,
     }
 }

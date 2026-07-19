@@ -10,7 +10,8 @@
 ## Features
 
 - **Recording:** microphone permissions, capture lifecycle, elapsed time, peaks, and live analysis.
-- **Playback:** loading, playback lifecycle, seeking, skipping, and playback rate.
+- **Playback:** loading, playback lifecycle, stop/reset, whole-source repeat,
+  seeking, skipping, and playback rate.
 - **Audio input devices:** enumeration, selection, permission requests, and device-change handling.
 - **Analysis:** peak reduction, waveform and spectrum data, levels, and PCM range trimming.
 - **Dioxus components:** player and recorder controls, scrubber, input
@@ -131,12 +132,21 @@ play failure are independent facets: a play request remains `PlayPending` until
 the browser confirms `Playing`, and an interaction-required rejection leaves the
 current source usable for retry.
 
+Calling `controller.stop()` atomically pauses Playback, resets position to zero,
+invalidates an outstanding play request, and returns a loaded source to
+`Ready`/`Idle`. Whole-source repeat is available through `repeat()`,
+`set_repeat()`, and `toggle_repeat()`; it remains enabled or disabled when the
+source is replaced or unloaded and applies to the next loaded source. It is
+separate from Bounded Playback over a Waveform Selection.
+
 The same Controller can drive independently arranged `PlaybackSeekSlider`,
-`PlaybackSkipButton`, `PlaybackPlayPauseButton`, and `PlaybackRateButton`
-components. Labels, signed skip amounts, and the rate cycle are configurable.
-The seek slider exposes source-time value text, which can be replaced with a
-localized `value_text`. `PlaybackStatusAnnouncer` is an optional polite live
-region for coarse lifecycle changes and never announces position continuously.
+`PlaybackSkipButton`, `PlaybackStopButton`, `PlaybackPlayPauseButton`,
+`PlaybackRateButton`, and `PlaybackRepeatButton` components. Labels, signed skip
+amounts, and the rate cycle are configurable. Repeat uses a stable label and
+native pressed state. The seek slider exposes source-time value text, which can
+be replaced with a localized `value_text`. `PlaybackStatusAnnouncer` is an
+optional polite live region for coarse lifecycle changes and never announces
+position continuously.
 
 ## Platform Support
 

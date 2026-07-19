@@ -4,8 +4,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use dioxus_audio::AudioData;
 use dioxus_audio::components::{
-    AudioPlayer, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackSeekSlider,
-    PlaybackSkipButton, PlaybackStatusAnnouncer, WaveformPreview,
+    AudioPlayer, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton,
+    PlaybackSeekSlider, PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton,
+    WaveformPreview,
 };
 use dioxus_audio::playback::use_audio_player;
 
@@ -47,6 +48,10 @@ pub fn PlaybackExample() -> Element {
                         seconds: -0.5,
                         label: "Rewind custom tone by half a second".to_string(),
                     }
+                    PlaybackStopButton {
+                        controller: custom_controller,
+                        label: "Stop custom tone".to_string(),
+                    }
                     PlaybackPlayPauseButton {
                         controller: custom_controller,
                         play_label: "Play custom tone".to_string(),
@@ -62,6 +67,10 @@ pub fn PlaybackExample() -> Element {
                         controller: custom_controller,
                         rates: vec![0.75, 1.0, 1.25],
                         label: "Listening rate".to_string(),
+                    }
+                    PlaybackRepeatButton {
+                        controller: custom_controller,
+                        label: "Repeat custom tone".to_string(),
                     }
                 }
             }

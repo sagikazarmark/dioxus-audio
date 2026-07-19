@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use dioxus::prelude::*;
-use dioxus_icons::lucide::{Pause, Play, RotateCcw, RotateCw};
+use dioxus_icons::lucide::{Pause, Play, Repeat2, RotateCcw, RotateCw, Square};
 
 use super::AudioScrubber;
 use crate::playback::{
@@ -151,6 +151,56 @@ pub fn PlaybackPlayPauseButton(
     }
 }
 
+/// A native button that stops Playback and resets its position.
+#[component]
+pub fn PlaybackStopButton(
+    controller: AudioPlayerController,
+    #[props(default = "Stop".to_string())] label: String,
+) -> Element {
+    let snapshot = controller.snapshot()();
+    let position = controller.position()();
+    let stopped = snapshot.transport == PlaybackTransport::Idle && position.is_zero();
+    let disabled = !matches!(snapshot.source, PlaybackSourceLifecycle::Playable) || stopped;
+
+    rsx! {
+        button {
+            class: "dioxus-audio dioxus-audio__control",
+            r#type: "button",
+            aria_label: label,
+            disabled,
+            onclick: move |_| { let _ = controller.stop(); },
+            Square { size: 18 }
+        }
+    }
+}
+
+/// A native toggle button for whole-source repeat.
+#[component]
+pub fn PlaybackRepeatButton(
+    controller: AudioPlayerController,
+    #[props(default = "Repeat".to_string())] label: String,
+) -> Element {
+    let snapshot = controller.snapshot()();
+    let repeat = snapshot.repeat;
+    let unsupported = matches!(
+        snapshot.source,
+        PlaybackSourceLifecycle::Failed(ref error)
+            if error.kind() == AudioErrorKind::UnsupportedPlatform
+    );
+
+    rsx! {
+        button {
+            class: "dioxus-audio dioxus-audio__control",
+            r#type: "button",
+            aria_label: label,
+            aria_pressed: if repeat { "true" } else { "false" },
+            disabled: unsupported,
+            onclick: move |_| controller.toggle_repeat(),
+            Repeat2 { size: 20 }
+        }
+    }
+}
+
 /// A native button that seeks Playback by a signed number of seconds.
 #[component]
 pub fn PlaybackSkipButton(
@@ -274,6 +324,7 @@ pub fn AudioPlayer(
             "data-transport": transport_state_name(snapshot.transport),
             "data-readiness": readiness_state_name(snapshot.readiness),
             "data-play-failure": play_failure_name(snapshot.play_failure.as_ref()),
+            "data-repeat": if snapshot.repeat { "true" } else { "false" },
             PlaybackSeekSlider { controller }
             div { class: "dioxus-audio__player-times",
                 span { "{format_time(position)}" }
@@ -281,9 +332,11 @@ pub fn AudioPlayer(
             }
             div { class: "dioxus-audio__player-controls",
                 PlaybackSkipButton { controller, seconds: -15.0 }
+                PlaybackStopButton { controller }
                 PlaybackPlayPauseButton { controller, on_request_audio }
                 PlaybackSkipButton { controller, seconds: 15.0 }
                 PlaybackRateButton { controller }
+                PlaybackRepeatButton { controller }
             }
             if let PlaybackStatus::Failed(ref error) = status {
                 div {

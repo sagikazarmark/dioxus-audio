@@ -1,10 +1,11 @@
 use dioxus::prelude::*;
 use dioxus_audio::components::{
     AudioInputSelector, AudioPlayer, AudioScrubber, MicrophoneStatusIndicator,
-    PlaybackAnnouncementLabels, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackSeekSlider,
-    PlaybackSkipButton, PlaybackStatusAnnouncer, RecorderAnnouncementLabels, RecorderCancelButton,
-    RecorderClearButton, RecorderControls, RecorderPauseResumeButton, RecorderStartButton,
-    RecorderStatusAnnouncer, RecorderStopButton, SpectrumVisualizer, WaveformPreview,
+    PlaybackAnnouncementLabels, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton,
+    PlaybackSeekSlider, PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton,
+    RecorderAnnouncementLabels, RecorderCancelButton, RecorderClearButton, RecorderControls,
+    RecorderPauseResumeButton, RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton,
+    SpectrumVisualizer, WaveformPreview,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
 use dioxus_audio::playback::use_audio_player;
@@ -85,6 +86,34 @@ fn playback_commands_can_be_composed_as_independent_native_controls() {
 }
 
 #[test]
+fn stop_and_repeat_are_reusable_native_controls() {
+    fn app() -> Element {
+        let source = use_signal(|| None::<dioxus_audio::AudioData>);
+        let controller = use_audio_player(source.into(), Duration::from_secs(20));
+
+        rsx! {
+            PlaybackStopButton {
+                controller,
+                label: "Reset episode".to_string(),
+            }
+            PlaybackRepeatButton {
+                controller,
+                label: "Repeat episode".to_string(),
+            }
+        }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+
+    assert_eq!(html.matches("type=\"button\"").count(), 2, "{html}");
+    assert!(html.contains("aria-label=\"Reset episode\""));
+    assert!(html.contains("aria-label=\"Repeat episode\""));
+    assert!(html.contains("aria-pressed=\"false\""));
+}
+
+#[test]
 fn live_visualizers_are_named_for_assistive_technology() {
     fn app() -> Element {
         let analyser = use_signal(|| None);
@@ -149,10 +178,14 @@ fn player_controls_have_explicit_accessible_names() {
     assert!(html.contains("aria-label=\"Play\""));
     assert!(html.contains("aria-label=\"Skip back 15 seconds\""));
     assert!(html.contains("aria-label=\"Playback speed: 1x\""));
+    assert!(html.contains("aria-label=\"Stop\""));
+    assert!(html.contains("aria-label=\"Repeat\""));
+    assert!(html.contains("aria-pressed=\"false\""));
     assert!(html.contains("data-source=\"empty\""));
     assert!(html.contains("data-transport=\"idle\""));
     assert!(html.contains("data-readiness=\"unavailable\""));
     assert!(html.contains("data-play-failure=\"none\""));
+    assert!(html.contains("data-repeat=\"false\""));
 }
 
 #[test]

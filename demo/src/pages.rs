@@ -1,6 +1,7 @@
 //! Routed documentation pages.
 
 pub mod analysis;
+pub mod decoding;
 pub mod devices;
 pub mod home;
 pub mod not_found;

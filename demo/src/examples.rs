@@ -1,6 +1,7 @@
 //! Small runnable components quoted by the documentation pages.
 
 pub mod analysis;
+pub mod decoding;
 pub mod devices;
 pub mod live_analysis;
 pub mod playback;

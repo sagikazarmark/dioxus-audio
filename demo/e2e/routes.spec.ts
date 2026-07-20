@@ -34,6 +34,14 @@ const documentedRoutes = [
     tabbed: false,
   },
   {
+    path: "/decoding",
+    heading: "Decode complete audio into planar samples",
+    section: "Complete-file decoding",
+    example: "No decode requested",
+    source: "pub fn DecodingExample",
+    tabbed: true,
+  },
+  {
     path: "/waveforms",
     heading: "Preview and select waveform ranges",
     section: "Waveform components",

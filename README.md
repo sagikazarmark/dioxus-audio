@@ -15,6 +15,8 @@
 - **Audio input devices:** enumeration, selection, permission requests, and device-change handling.
 - **Analysis:** bounded reactive snapshots, interpretable waveform and spectrum
   data, RMS levels, peak reduction, and PCM range trimming.
+- **Decoding:** complete Audio Data to immutable channel-preserving planar samples
+  with an explicit Rust-copy memory ceiling.
 - **Dioxus components:** player and recorder controls, scrubber, input
   selector, microphone status, waveform views, spectrum, and level meter.
 - **Scoped styles:** authored CSS with a `dioxus-audio` namespace and stable
@@ -161,6 +163,57 @@ perceived loudness, sound pressure level, or Playback audibility.
 `LiveWaveform`, `SpectrumVisualizer`, and `LevelMeter` use the same bounded
 scheduling behavior while collecting only the values each presentation needs.
 Their changing Analysis values are not live-region announcements.
+
+## Decoded Audio
+
+Use `decode_audio_data` to consume complete `AudioData` and copy the browser's
+decoded channels into one immutable flat-planar Rust allocation:
+
+```rust
+use dioxus_audio::AudioData;
+use dioxus_audio::decoding::{DecodeOptions, decode_audio_data};
+
+async fn inspect(audio: AudioData) -> Result<(), Box<dyn std::error::Error>> {
+    let decoded = decode_audio_data(audio, DecodeOptions::default()).await?;
+
+    println!(
+        "{} channels, {} frames at {} Hz ({:?})",
+        decoded.channel_count(),
+        decoded.frame_count(),
+        decoded.sample_rate(),
+        decoded.duration(),
+    );
+    for channel in decoded.channels() {
+        // Each item is one borrowed contiguous channel slice.
+        analyze(channel);
+    }
+
+    Ok(())
+}
+
+fn analyze(_samples: &[f32]) {}
+```
+
+The reported sample rate is the browser decode context's effective rate, not a
+claim about the encoded source's original rate. The media type is retained as
+part of `AudioData` but browser `decodeAudioData` does not consume it; media-type
+support probes therefore cannot prove that a particular payload will decode.
+Unsupported codecs, malformed or truncated input, and decoder refusal all map
+to the portable `DecodeErrorKind::DecodeRejected` outcome.
+
+`DecodeOptions` defaults to a 128 MiB ceiling for the Rust-owned planar `f32`
+copy and allows an explicit `with_max_decoded_bytes` override. The size uses
+checked channel, frame, and sample-width arithmetic, and a resource-limit error
+reports both required and configured bytes. This gate runs only after the
+browser has decoded the complete file, so it cannot prevent the browser's first
+PCM allocation. Successful materialization may briefly retain roughly two PCM
+representations, excluding encoded data and opaque decoder internals.
+
+Each operation owns an internal `AudioContext` and requests context cleanup when
+it settles or its future is dropped. Dropping the future suppresses result
+publication, but does not promise to abort decoding work already started by the
+browser. Decoded Audio is not a streaming decoder, mutable sample buffer,
+resampler, transformed output, or Playback source.
 
 ## Playback
 

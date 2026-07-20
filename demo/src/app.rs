@@ -5,8 +5,9 @@ use dioxus_audio::components::AudioStyles;
 
 use crate::components::{DemoFooter, DemoHeader, Sidebar, SidebarNavLink, SidebarNavSection};
 use crate::pages::{
-    analysis::Analysis, devices::Devices, home::Home, not_found::NotFound, playback::Playback,
-    recorder::Recorder, styles::Styles, visualizers::Visualizers, waveforms::Waveforms,
+    analysis::Analysis, decoding::Decoding, devices::Devices, home::Home, not_found::NotFound,
+    playback::Playback, recorder::Recorder, styles::Styles, visualizers::Visualizers,
+    waveforms::Waveforms,
 };
 
 const STYLE: Asset = asset!("/build/style.css");
@@ -28,6 +29,8 @@ pub enum Route {
     Waveforms {},
     #[route("/analysis")]
     Analysis {},
+    #[route("/decoding")]
+    Decoding {},
     #[route("/styles")]
     Styles {},
     #[route("/:..segments")]
@@ -66,6 +69,7 @@ fn DemoLayout() -> Element {
                         SidebarNavLink { route: Route::Visualizers {}, label: "Live analysis" }
                     }
                     SidebarNavSection { label: "Processing",
+                        SidebarNavLink { route: Route::Decoding {}, label: "Decoded Audio" }
                         SidebarNavLink { route: Route::Waveforms {}, label: "Waveforms" }
                         SidebarNavLink { route: Route::Analysis {}, label: "Analysis helpers" }
                     }

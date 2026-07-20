@@ -38,6 +38,12 @@ fn features() -> Vec<Feature> {
             cta: "See visualizers",
         },
         Feature {
+            title: "Decoded Audio",
+            body: "Decode complete encoded audio into immutable channel-preserving samples.",
+            route: Route::Decoding {},
+            cta: "Decode audio data",
+        },
+        Feature {
             title: "Waveform UI",
             body: "Preview recorded Peaks and edit a source-time range for trimming workflows.",
             route: Route::Waveforms {},

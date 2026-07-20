@@ -153,12 +153,24 @@ encoded bytes and carries the effective media type, a Recorder-local
 serially in browser event order and are not guaranteed to be independently
 playable.
 
+While an opted-in Recording is active or paused,
+`recorder.request_chunk_boundary()` asks the browser for another best-effort
+boundary. The request does not promise exact timing, a non-empty chunk, or a
+fragment that can be played without earlier chunks.
+
 Callback return hands the chunk to the application; the library does not add an
 upload, persistence, retry, acknowledgement, or backpressure queue. Recorder
 still retains every browser fragment needed for final `RecordedAudio`, so chunk
 delivery does not reduce completion memory. On success, all final chunks are
 delivered before `recorder.completed()` becomes populated. Discard and unmount
 suppress output that has not already been handed off.
+
+If incremental blob conversion fails, `recorder.chunk_delivery_failure()`
+identifies the Recording and failed sequence. That failure ends chunk delivery
+for the Recording, but capture continues and final `RecordedAudio` assembly is
+still attempted from the independently retained browser fragments. A Recorder,
+encoder, or final-assembly failure instead ends the Recording, suppresses future
+chunks and completed output, and is reported through `recorder.outcome()`.
 
 `RecordedAudio::recording_id` correlates completion with its chunks.
 `recorder.outcome()` exposes the same ID for completed, discarded, and failed

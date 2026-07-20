@@ -1,5 +1,487 @@
 import { expect, test } from "./fixtures";
 
+test("best-effort chunk boundaries can be requested while active or paused", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      requestedChunkBoundaries?: number;
+    };
+    MediaRecorder.prototype.requestData = function () {
+      const boundary = (browser.requestedChunkBoundaries ?? 0) + 1;
+      browser.requestedChunkBoundaries = boundary;
+      const bytes = new Uint8Array(6 + boundary);
+      this.dispatchEvent(
+        new BlobEvent("dataavailable", {
+          data: new Blob([bytes], { type: this.mimeType }),
+        }),
+      );
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+  const requestBoundary = demo.getByRole("button", {
+    name: "Request chunk boundary",
+  });
+
+  await expect(requestBoundary).toBeDisabled();
+  await demo.getByRole("button", { name: "Start recording" }).click();
+  await expect(requestBoundary).toBeEnabled();
+  await requestBoundary.click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          requestedChunkBoundaries?: number;
+        };
+        return browser.requestedChunkBoundaries ?? 0;
+      }),
+    )
+    .toBe(1);
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).some((event) =>
+        event.includes("| bytes 7 |"),
+      ),
+    )
+    .toBe(true);
+
+  await demo.getByRole("button", { name: "Pause", exact: true }).click();
+  await expect(
+    demo.getByText("Recording paused", { exact: true }),
+  ).toBeVisible();
+  await expect(requestBoundary).toBeEnabled();
+  await requestBoundary.click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          requestedChunkBoundaries?: number;
+        };
+        return browser.requestedChunkBoundaries ?? 0;
+      }),
+    )
+    .toBe(2);
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).some((event) =>
+        event.includes("| bytes 8 |"),
+      ),
+    )
+    .toBe(true);
+  await expect(
+    demo.getByText("Recording paused", { exact: true }),
+  ).toBeVisible();
+
+  const chunks = (await lifecycle.locator("li").allTextContents())
+    .map((event) =>
+      event.match(
+        /^Primary chunk \| (Recorder \d+ Recording \d+) \| sequence (\d+) \| bytes (\d+) \|/,
+      ),
+    )
+    .filter((match): match is RegExpMatchArray => match !== null);
+  expect(chunks.map((chunk) => Number(chunk[2]))).toEqual(
+    chunks.map((_, sequence) => sequence),
+  );
+  const requestedChunks = chunks.filter((chunk) =>
+    [7, 8].includes(Number(chunk[3])),
+  );
+  expect(requestedChunks).toHaveLength(2);
+  expect(new Set(requestedChunks.map((chunk) => chunk[1])).size).toBe(1);
+});
+
+test("incremental conversion failure ends delivery but not final completion", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      failBoundaryConversion?: boolean;
+      failNextDataEvent?: boolean;
+      failedConversion?: boolean;
+    };
+    const failedBlobs = new WeakSet<Blob>();
+    const requestData = MediaRecorder.prototype.requestData;
+    MediaRecorder.prototype.requestData = function () {
+      if (browser.failBoundaryConversion) {
+        browser.failBoundaryConversion = false;
+        browser.failNextDataEvent = true;
+      }
+      return requestData.call(this);
+    };
+    const onDataAvailable = Object.getOwnPropertyDescriptor(
+      MediaRecorder.prototype,
+      "ondataavailable",
+    );
+    if (onDataAvailable?.get && onDataAvailable.set) {
+      Object.defineProperty(MediaRecorder.prototype, "ondataavailable", {
+        configurable: true,
+        get: onDataAvailable.get,
+        set(handler: ((event: BlobEvent) => void) | null) {
+          const wrapped = handler
+            ? (event: BlobEvent) => {
+                if (browser.failNextDataEvent) {
+                  browser.failNextDataEvent = false;
+                  failedBlobs.add(event.data);
+                }
+                handler.call(this, event);
+              }
+            : null;
+          onDataAvailable.set?.call(this, wrapped);
+        },
+      });
+    }
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function () {
+      if (failedBlobs.has(this)) {
+        failedBlobs.delete(this);
+        browser.failedConversion = true;
+        return Promise.reject("forced incremental conversion failure");
+      }
+      return arrayBuffer.call(this);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+
+  await demo.getByRole("button", { name: "Start recording" }).click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Primary chunk"),
+      ).length,
+    )
+    .toBeGreaterThan(0);
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      failBoundaryConversion?: boolean;
+    };
+    browser.failBoundaryConversion = true;
+  });
+  await demo.getByRole("button", { name: "Request chunk boundary" }).click();
+
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).find((event) =>
+        event.startsWith("Chunk delivery failed"),
+      ),
+    )
+    .toMatch(/^Chunk delivery failed \| Recorder \d+ Recording \d+ \| sequence \d+ \|/);
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        failedConversion?: boolean;
+      };
+      return browser.failedConversion;
+    }),
+  ).toBe(true);
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+
+  const eventsAtFailure = await lifecycle.locator("li").allTextContents();
+  const failure = eventsAtFailure
+    .find((event) => event.startsWith("Chunk delivery failed"))
+    ?.match(
+      /^Chunk delivery failed \| (Recorder \d+ Recording \d+) \| sequence (\d+) \|/,
+    );
+  const transferred = eventsAtFailure.filter((event) =>
+    event.startsWith("Primary chunk"),
+  );
+  expect(failure).not.toBeNull();
+  expect(Number(failure?.[2])).toBe(transferred.length);
+
+  await page.waitForTimeout(500);
+  expect(
+    (await lifecycle.locator("li").allTextContents()).filter((event) =>
+      event.startsWith("Primary chunk"),
+    ),
+  ).toHaveLength(transferred.length);
+
+  await demo.getByRole("button", { name: "Stop recording" }).click();
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toBeVisible();
+  const finalEvents = await lifecycle.locator("li").allTextContents();
+  expect(
+    finalEvents.filter((event) => event.startsWith("Primary chunk")),
+  ).toHaveLength(transferred.length);
+  expect(finalEvents.at(-1)).toMatch(
+    new RegExp(`^Completed \\| ${failure?.[1]} \\| bytes [1-9]\\d*$`),
+  );
+});
+
+test("a Recorder failure terminates chunk delivery and completed output", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      activeMediaRecorder?: MediaRecorder;
+    };
+    const onError = Object.getOwnPropertyDescriptor(
+      MediaRecorder.prototype,
+      "onerror",
+    );
+    if (onError?.get && onError.set) {
+      Object.defineProperty(MediaRecorder.prototype, "onerror", {
+        configurable: true,
+        get: onError.get,
+        set(handler: ((event: Event) => void) | null) {
+          browser.activeMediaRecorder = this;
+          onError.set?.call(this, handler);
+        },
+      });
+    }
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+
+  await demo.getByRole("button", { name: "Start recording" }).click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Primary chunk"),
+      ).length,
+    )
+    .toBeGreaterThan(0);
+  const firstChunk = (await lifecycle.locator("li").allTextContents())
+    .find((event) => event.startsWith("Primary chunk"))
+    ?.match(/^Primary chunk \| (Recorder \d+ Recording \d+) \|/);
+
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      activeMediaRecorder?: MediaRecorder;
+    };
+    browser.activeMediaRecorder?.dispatchEvent(new Event("error"));
+    browser.activeMediaRecorder?.stop();
+  });
+
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Failed"),
+      ),
+    )
+    .toEqual([
+      `Failed | ${firstChunk?.[1]} | media recorder failed`,
+    ]);
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toHaveCount(0);
+  const eventsAtFailure = await lifecycle.locator("li").allTextContents();
+  const transferredAtFailure = eventsAtFailure.filter((event) =>
+    event.startsWith("Primary chunk"),
+  ).length;
+  await page.waitForTimeout(500);
+  const finalEvents = await lifecycle.locator("li").allTextContents();
+  expect(
+    finalEvents.filter((event) => event.startsWith("Primary chunk")),
+  ).toHaveLength(transferredAtFailure);
+  expect(finalEvents.filter((event) => event.startsWith("Failed"))).toHaveLength(
+    1,
+  );
+  expect(finalEvents.some((event) => event.startsWith("Completed"))).toBe(false);
+});
+
+test("final assembly failure publishes one identified failure and no Recorded Audio", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      failFinalAssembly?: boolean;
+    };
+    const fragments = new WeakSet<Blob>();
+    const onDataAvailable = Object.getOwnPropertyDescriptor(
+      MediaRecorder.prototype,
+      "ondataavailable",
+    );
+    if (onDataAvailable?.get && onDataAvailable.set) {
+      Object.defineProperty(MediaRecorder.prototype, "ondataavailable", {
+        configurable: true,
+        get: onDataAvailable.get,
+        set(handler: ((event: BlobEvent) => void) | null) {
+          const wrapped = handler
+            ? (event: BlobEvent) => {
+                fragments.add(event.data);
+                handler.call(this, event);
+              }
+            : null;
+          onDataAvailable.set?.call(this, wrapped);
+        },
+      });
+    }
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function () {
+      if (browser.failFinalAssembly && !fragments.has(this)) {
+        browser.failFinalAssembly = false;
+        return Promise.reject("forced final assembly failure");
+      }
+      return arrayBuffer.call(this);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+
+  await demo.getByRole("button", { name: "Start recording" }).click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Primary chunk"),
+      ).length,
+    )
+    .toBeGreaterThan(0);
+  const firstChunk = (await lifecycle.locator("li").allTextContents())
+    .find((event) => event.startsWith("Primary chunk"))
+    ?.match(/^Primary chunk \| (Recorder \d+ Recording \d+) \|/);
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      failFinalAssembly?: boolean;
+    };
+    browser.failFinalAssembly = true;
+  });
+  await demo.getByRole("button", { name: "Stop recording" }).click();
+
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Failed"),
+      ),
+    )
+    .toEqual([
+      `Failed | ${firstChunk?.[1]} | forced final assembly failure`,
+    ]);
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toHaveCount(0);
+  const finalEvents = await lifecycle.locator("li").allTextContents();
+  expect(finalEvents.filter((event) => event.startsWith("Failed"))).toHaveLength(
+    1,
+  );
+  expect(finalEvents.some((event) => event.startsWith("Completed"))).toBe(false);
+});
+
+test("discard invalidates a requested boundary conversion", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      delayBoundaryConversion?: boolean;
+      delayNextDataEvent?: boolean;
+      boundaryConversionStarted?: boolean;
+    };
+    const delayedBlobs = new WeakSet<Blob>();
+    const requestData = MediaRecorder.prototype.requestData;
+    MediaRecorder.prototype.requestData = function () {
+      if (browser.delayBoundaryConversion) {
+        browser.delayBoundaryConversion = false;
+        browser.delayNextDataEvent = true;
+      }
+      return requestData.call(this);
+    };
+    const onDataAvailable = Object.getOwnPropertyDescriptor(
+      MediaRecorder.prototype,
+      "ondataavailable",
+    );
+    if (onDataAvailable?.get && onDataAvailable.set) {
+      Object.defineProperty(MediaRecorder.prototype, "ondataavailable", {
+        configurable: true,
+        get: onDataAvailable.get,
+        set(handler: ((event: BlobEvent) => void) | null) {
+          const wrapped = handler
+            ? (event: BlobEvent) => {
+                if (browser.delayNextDataEvent) {
+                  browser.delayNextDataEvent = false;
+                  delayedBlobs.add(event.data);
+                }
+                handler.call(this, event);
+              }
+            : null;
+          onDataAvailable.set?.call(this, wrapped);
+        },
+      });
+    }
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = async function () {
+      if (delayedBlobs.has(this)) {
+        delayedBlobs.delete(this);
+        browser.boundaryConversionStarted = true;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      return arrayBuffer.call(this);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+
+  await demo.getByRole("button", { name: "Start recording" }).click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Primary chunk"),
+      ).length,
+    )
+    .toBeGreaterThan(0);
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      delayBoundaryConversion?: boolean;
+    };
+    browser.delayBoundaryConversion = true;
+  });
+  await demo.getByRole("button", { name: "Request chunk boundary" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          boundaryConversionStarted?: boolean;
+        };
+        return browser.boundaryConversionStarted ?? false;
+      }),
+    )
+    .toBe(true);
+  const chunksBeforeDiscard = (
+    await lifecycle.locator("li").allTextContents()
+  ).filter((event) => event.startsWith("Primary chunk")).length;
+
+  await demo.getByRole("button", { name: "Cancel recording" }).click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Discarded"),
+      ).length,
+    )
+    .toBe(1);
+  await page.waitForTimeout(700);
+
+  const finalEvents = await lifecycle.locator("li").allTextContents();
+  expect(
+    finalEvents.filter((event) => event.startsWith("Primary chunk")),
+  ).toHaveLength(chunksBeforeDiscard);
+  expect(
+    finalEvents.some((event) => event.startsWith("Chunk delivery failed")),
+  ).toBe(false);
+  expect(finalEvents.some((event) => event.startsWith("Completed"))).toBe(false);
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toHaveCount(0);
+});
+
 test("a recording can be paused, resumed, completed, and played", async ({
   openRoute,
   page,
@@ -339,13 +821,14 @@ test("unmount suppresses an in-flight chunk conversion", async ({
     const browser = globalThis as typeof globalThis & {
       chunkArrayBufferCalls?: number;
     };
-    const arrayBuffer = Blob.prototype.arrayBuffer;
     Blob.prototype.arrayBuffer = async function () {
       browser.chunkArrayBufferCalls = (browser.chunkArrayBufferCalls ?? 0) + 1;
       await new Promise((resolve) => setTimeout(resolve, 500));
-      return arrayBuffer.call(this);
+      return Promise.reject("forced conversion failure after unmount");
     };
   });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
   await openRoute("/recorder", "Capture, inspect, and replay");
   const demo = page.getByRole("region", { name: "Example demo" });
   const lifecycle = demo.getByRole("log", {
@@ -370,6 +853,7 @@ test("unmount suppresses an in-flight chunk conversion", async ({
   await page.waitForTimeout(700);
 
   await expect(lifecycle.locator("li")).toHaveCount(0);
+  expect(pageErrors).toEqual([]);
 });
 
 test("cancelling source acquisition publishes an identified discard", async ({

@@ -31,6 +31,7 @@ pub(super) fn use_web_audio_recorder(
     let mut settings = use_signal(|| None::<RecordingSourceSettings>);
     let mut media_type = use_signal(|| None::<String>);
     let mut outcome = use_signal(|| None::<RecordingOutcome>);
+    let mut chunk_delivery_failure = use_signal(|| None::<RecordingChunkDeliveryFailure>);
     let mut microphone = use_signal(|| MicrophoneStatus {
         permission: MicrophonePermission::Unknown,
         recorder: RecorderStatus::Idle,
@@ -72,6 +73,7 @@ pub(super) fn use_web_audio_recorder(
         let recording_id = runtime_for_start.borrow_mut().lifecycle.start()?;
         let input_device = selected_input();
         outcome.set(None);
+        chunk_delivery_failure.set(None);
         requested_constraints.set(Some(options.constraints.clone()));
         settings.set(None);
         media_type.set(None);
@@ -111,6 +113,7 @@ pub(super) fn use_web_audio_recorder(
                 settings,
                 media_type,
                 outcome,
+                chunk_delivery_failure,
                 dioxus_runtime.clone(),
                 dioxus_scope,
             )
@@ -200,6 +203,28 @@ pub(super) fn use_web_audio_recorder(
         Ok(())
     });
 
+    let runtime_for_boundary = runtime.clone();
+    let request_chunk_boundary: Callback<(), Result<(), RecorderCommandError>> =
+        use_callback(move |()| {
+            let recorder = {
+                let runtime = runtime_for_boundary.borrow();
+                runtime.lifecycle.request_chunk_boundary()?;
+                let recording = runtime
+                    .recording
+                    .as_ref()
+                    .ok_or_else(|| command_error("no active recorder"))?;
+                if recording.chunk_delivery.is_none() {
+                    return Err(command_error(
+                        "Recording Chunk delivery was not enabled when recording started",
+                    ));
+                }
+                recording.recorder.clone()
+            };
+            recorder
+                .request_data()
+                .map_err(|_| command_error("browser rejected the chunk boundary request"))
+        });
+
     let runtime_for_stop = runtime.clone();
     let stop: Callback<(), Result<(), RecorderCommandError>> = use_callback(move |()| {
         stop_or_cancel(
@@ -251,9 +276,11 @@ pub(super) fn use_web_audio_recorder(
         settings: settings.into(),
         media_type: media_type.into(),
         outcome: outcome.into(),
+        chunk_delivery_failure: chunk_delivery_failure.into(),
         start,
         pause,
         resume,
+        request_chunk_boundary,
         stop,
         cancel,
         take_completed,
@@ -308,6 +335,7 @@ struct ChunkDeliveryState {
     configuration: RecordingChunkDelivery,
     dioxus_runtime: Rc<DioxusRuntime>,
     dioxus_scope: ScopeId,
+    failure_signal: Signal<Option<RecordingChunkDeliveryFailure>>,
     pending: VecDeque<PendingChunk>,
     worker_active: bool,
     enabled: bool,
@@ -326,12 +354,14 @@ impl ChunkDelivery {
         configuration: RecordingChunkDelivery,
         dioxus_runtime: Rc<DioxusRuntime>,
         dioxus_scope: ScopeId,
+        failure_signal: Signal<Option<RecordingChunkDeliveryFailure>>,
     ) -> Self {
         Self {
             state: Rc::new(RefCell::new(ChunkDeliveryState {
                 configuration,
                 dioxus_runtime,
                 dioxus_scope,
+                failure_signal,
                 pending: VecDeque::new(),
                 worker_active: false,
                 enabled: true,
@@ -412,15 +442,41 @@ async fn deliver_chunks(state: Rc<RefCell<ChunkDeliveryState>>) {
 
         let bytes = match blob_to_owned_bytes(&pending.blob).await {
             Ok(bytes) if !bytes.is_empty() => bytes,
-            _ => {
-                let waiters = {
+            result => {
+                let error = result.err().unwrap_or_else(|| {
+                    AudioError::new(
+                        AudioErrorKind::Backend,
+                        "Recording Chunk conversion produced no data",
+                    )
+                });
+                let publication = {
                     let mut state = state.borrow_mut();
-                    state.enabled = false;
-                    state.pending.clear();
-                    state.worker_active = false;
-                    std::mem::take(&mut state.drain_waiters)
+                    if !state.enabled {
+                        None
+                    } else {
+                        state.enabled = false;
+                        state.pending.clear();
+                        Some((
+                            state.dioxus_runtime.clone(),
+                            state.dioxus_scope,
+                            state.failure_signal,
+                            std::mem::take(&mut state.drain_waiters),
+                        ))
+                    }
                 };
-                resolve_waiters(waiters);
+                if let Some((dioxus_runtime, dioxus_scope, mut failure_signal, waiters)) =
+                    publication
+                {
+                    resolve_waiters(waiters);
+                    dioxus_runtime.in_scope(dioxus_scope, || {
+                        failure_signal.set(Some(RecordingChunkDeliveryFailure {
+                            recording_id: pending.recording_id,
+                            failed_sequence: pending.sequence,
+                            error,
+                        }));
+                    });
+                }
+                state.borrow_mut().worker_active = false;
                 return;
             }
         };
@@ -561,6 +617,7 @@ async fn start_recording(
     mut settings_signal: Signal<Option<RecordingSourceSettings>>,
     mut media_type_signal: Signal<Option<String>>,
     mut outcome_signal: Signal<Option<RecordingOutcome>>,
+    chunk_delivery_failure: Signal<Option<RecordingChunkDeliveryFailure>>,
     dioxus_runtime: Rc<DioxusRuntime>,
     dioxus_scope: ScopeId,
 ) -> Result<(), AudioError> {
@@ -626,10 +683,14 @@ async fn start_recording(
         })?;
     let settings = read_settings(&track);
     let chunks = Rc::new(RefCell::new(Vec::<Blob>::new()));
-    let chunk_delivery = options
-        .chunk_delivery
-        .clone()
-        .map(|delivery| ChunkDelivery::new(delivery, dioxus_runtime.clone(), dioxus_scope));
+    let chunk_delivery = options.chunk_delivery.clone().map(|delivery| {
+        ChunkDelivery::new(
+            delivery,
+            dioxus_runtime.clone(),
+            dioxus_scope,
+            chunk_delivery_failure,
+        )
+    });
     let start_resolver = Rc::new(RefCell::new(None::<js_sys::Function>));
     let resolver_for_promise = start_resolver.clone();
     let start_promise = js_sys::Promise::new(&mut move |resolve, _| {

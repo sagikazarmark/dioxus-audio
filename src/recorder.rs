@@ -53,6 +53,31 @@ impl RecordingOutcome {
     }
 }
 
+/// The terminal failure of incremental Recording Chunk delivery.
+///
+/// Capture and final Recorded Audio assembly continue independently after this
+/// failure, but this Recording will deliver no later chunks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordingChunkDeliveryFailure {
+    recording_id: RecordingId,
+    failed_sequence: u64,
+    error: AudioError,
+}
+
+impl RecordingChunkDeliveryFailure {
+    pub fn recording_id(&self) -> RecordingId {
+        self.recording_id
+    }
+
+    pub fn failed_sequence(&self) -> u64 {
+        self.failed_sequence
+    }
+
+    pub fn error(&self) -> &AudioError {
+        &self.error
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecorderCommandError {
     message: &'static str,
@@ -164,6 +189,18 @@ impl RecorderLifecycle {
             return Err(command_error("recording can only be resumed while paused"));
         }
         self.status = RecorderStatus::Recording;
+        Ok(())
+    }
+
+    pub fn request_chunk_boundary(&self) -> Result<(), RecorderCommandError> {
+        if !matches!(
+            self.status,
+            RecorderStatus::Recording | RecorderStatus::Paused
+        ) {
+            return Err(command_error(
+                "a chunk boundary can only be requested while recording or paused",
+            ));
+        }
         Ok(())
     }
 
@@ -323,6 +360,8 @@ type RecordingChunkHandler = Rc<RefCell<Box<dyn FnMut(RecordingChunk)>>>;
 #[derive(Clone)]
 pub struct RecordingChunkDelivery {
     /// Approximate interval at which the browser should create chunk boundaries.
+    ///
+    /// Boundaries may be empty, late, or dependent on earlier fragments.
     pub cadence: Duration,
     on_chunk: RecordingChunkHandler,
 }
@@ -446,9 +485,11 @@ pub struct AudioRecorder {
     settings: ReadSignal<Option<RecordingSourceSettings>>,
     media_type: ReadSignal<Option<String>>,
     outcome: ReadSignal<Option<RecordingOutcome>>,
+    chunk_delivery_failure: ReadSignal<Option<RecordingChunkDeliveryFailure>>,
     start: Callback<(), Result<(), RecorderCommandError>>,
     pause: Callback<(), Result<(), RecorderCommandError>>,
     resume: Callback<(), Result<(), RecorderCommandError>>,
+    request_chunk_boundary: Callback<(), Result<(), RecorderCommandError>>,
     stop: Callback<(), Result<(), RecorderCommandError>>,
     cancel: Callback<(), Result<(), RecorderCommandError>>,
     take_completed: Callback<(), Option<RecordedAudio>>,
@@ -503,6 +544,11 @@ impl AudioRecorder {
         self.outcome
     }
 
+    /// Terminal incremental delivery failure for the current or most recent Recording.
+    pub fn chunk_delivery_failure(self) -> ReadSignal<Option<RecordingChunkDeliveryFailure>> {
+        self.chunk_delivery_failure
+    }
+
     pub fn start(self) -> Result<(), RecorderCommandError> {
         self.start.call(())
     }
@@ -513,6 +559,15 @@ impl AudioRecorder {
 
     pub fn resume(self) -> Result<(), RecorderCommandError> {
         self.resume.call(())
+    }
+
+    /// Ask the browser to create a best-effort Recording Chunk boundary.
+    ///
+    /// The request is available only to an opted-in Recording while active or
+    /// paused. It does not promise exact timing, non-empty output, or an
+    /// independently playable chunk.
+    pub fn request_chunk_boundary(self) -> Result<(), RecorderCommandError> {
+        self.request_chunk_boundary.call(())
     }
 
     pub fn stop(self) -> Result<(), RecorderCommandError> {
@@ -579,6 +634,7 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
     let settings = use_signal(|| None::<RecordingSourceSettings>);
     let media_type = use_signal(|| None::<String>);
     let outcome = use_signal(|| None::<RecordingOutcome>);
+    let chunk_delivery_failure = use_signal(|| None::<RecordingChunkDeliveryFailure>);
     let mut microphone = use_signal(|| MicrophoneStatus {
         permission: MicrophonePermission::Unknown,
         recorder: RecorderStatus::Idle,
@@ -616,9 +672,11 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
         settings: settings.into(),
         media_type: media_type.into(),
         outcome: outcome.into(),
+        chunk_delivery_failure: chunk_delivery_failure.into(),
         start: unsupported,
         pause: unsupported,
         resume: unsupported,
+        request_chunk_boundary: unsupported,
         stop: unsupported,
         cancel: unsupported,
         take_completed,

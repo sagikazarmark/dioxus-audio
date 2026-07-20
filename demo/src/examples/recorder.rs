@@ -153,6 +153,20 @@ fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Eleme
         }
     });
     use_effect(move || {
+        if let Some(failure) = recorder.chunk_delivery_failure()() {
+            let recording_label = recording_label(
+                recorder_number,
+                &mut recording_ids,
+                failure.recording_id(),
+            );
+            events.write().push(format!(
+                "Chunk delivery failed | {recording_label} | sequence {} | {}",
+                failure.failed_sequence(),
+                failure.error(),
+            ));
+        }
+    });
+    use_effect(move || {
         mime_supported.set(Some(is_recorder_mime_type_supported(
             "audio/webm;codecs=opus",
         )));
@@ -302,6 +316,15 @@ fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Eleme
             }
             LevelMeter { analyser: recorder.analyser() }
             RecorderControls { recorder }
+            button {
+                class: "btn btn-sm btn-outline justify-self-center",
+                r#type: "button",
+                disabled: !matches!(status, RecorderStatus::Recording | RecorderStatus::Paused),
+                onclick: move |_| {
+                    let _ = recorder.request_chunk_boundary();
+                },
+                "Request chunk boundary"
+            }
             div {
                 class: "rounded-2xl border border-base-300 bg-base-100 p-4",
                 role: "group",

@@ -132,6 +132,26 @@ fn recording_chunks_keep_identity_and_sequence_across_pause_resume_and_stop() {
 }
 
 #[test]
+fn best_effort_chunk_boundaries_preserve_identity_and_sequence_while_active_or_paused() {
+    let mut recorder = RecorderLifecycle::default();
+    assert!(recorder.request_chunk_boundary().is_err());
+
+    let recording_id = recorder.start().unwrap();
+    recorder.started(recording_id);
+
+    recorder.request_chunk_boundary().unwrap();
+    assert_eq!(recorder.next_chunk_sequence(recording_id), Some(0));
+
+    recorder.pause().unwrap();
+    recorder.request_chunk_boundary().unwrap();
+    assert_eq!(recorder.next_chunk_sequence(recording_id), Some(1));
+
+    recorder.resume().unwrap();
+    recorder.stop().unwrap();
+    assert!(recorder.request_chunk_boundary().is_err());
+}
+
+#[test]
 fn discard_suppresses_chunks_and_a_restart_gets_new_identity_and_sequence() {
     let mut recorder = RecorderLifecycle::default();
     let discarded_id = recorder.start().unwrap();

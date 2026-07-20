@@ -76,7 +76,7 @@ impl PlaybackSourceAlternative {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PlaybackSourceInput {
     AudioData(Arc<AudioData>),
-    Url(PlaybackSourceAlternative),
+    Url(Arc<[PlaybackSourceAlternative]>),
 }
 
 /// One owned Playback input and its loading policy.
@@ -96,8 +96,34 @@ impl PlaybackSource {
 
     pub fn url(alternative: PlaybackSourceAlternative) -> Self {
         Self {
-            input: PlaybackSourceInput::Url(alternative),
+            input: PlaybackSourceInput::Url(Arc::from([alternative])),
             loading_policy: PlaybackLoadingPolicy::Eager,
+        }
+    }
+
+    /// Build a URL-backed Playback Source from ordered alternatives.
+    pub fn url_alternatives(
+        alternatives: impl IntoIterator<Item = PlaybackSourceAlternative>,
+    ) -> Result<Self, AudioError> {
+        let alternatives: Arc<[PlaybackSourceAlternative]> = alternatives.into_iter().collect();
+        if alternatives.is_empty() {
+            return Err(AudioError::new(
+                AudioErrorKind::InvalidConfiguration,
+                "a URL Playback Source must contain at least one alternative",
+            ));
+        }
+
+        Ok(Self {
+            input: PlaybackSourceInput::Url(alternatives),
+            loading_policy: PlaybackLoadingPolicy::Eager,
+        })
+    }
+
+    /// Return the ordered URL alternatives, or `None` for Audio Data.
+    pub fn alternatives(&self) -> Option<&[PlaybackSourceAlternative]> {
+        match &self.input {
+            PlaybackSourceInput::AudioData(_) => None,
+            PlaybackSourceInput::Url(alternatives) => Some(alternatives),
         }
     }
 
@@ -181,6 +207,50 @@ impl PlaybackSourceFailure {
             | Self::Unknown(error) => error,
         }
     }
+
+    pub fn kind(&self) -> PlaybackSourceFailureKind {
+        match self {
+            Self::Unsupported(_) => PlaybackSourceFailureKind::Unsupported,
+            Self::Network(_) => PlaybackSourceFailureKind::Network,
+            Self::Decode(_) => PlaybackSourceFailureKind::Decode,
+            Self::Unknown(_) => PlaybackSourceFailureKind::Unknown,
+        }
+    }
+}
+
+/// A portable kind for one URL alternative's initial load failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackSourceFailureKind {
+    Unsupported,
+    Network,
+    Decode,
+    Unknown,
+}
+
+/// The coarse failure of one URL alternative during initial selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaybackAlternativeFailure {
+    alternative: PlaybackSourceAlternative,
+    kind: PlaybackSourceFailureKind,
+}
+
+impl PlaybackAlternativeFailure {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn new(alternative: PlaybackSourceAlternative, failure: &PlaybackSourceFailure) -> Self {
+        Self {
+            alternative,
+            kind: failure.kind(),
+        }
+    }
+
+    pub fn alternative(&self) -> &PlaybackSourceAlternative {
+        &self.alternative
+    }
+
+    pub fn kind(&self) -> PlaybackSourceFailureKind {
+        self.kind
+    }
 }
 
 /// A play request failure that leaves the current source usable for retry.
@@ -251,10 +321,12 @@ pub struct PlaybackSnapshot {
     pub source: PlaybackSourceLifecycle,
     pub transport: PlaybackTransport,
     pub readiness: PlaybackReadiness,
-    /// The committed URL alternative, if the current source is URL-addressable.
+    /// The selected URL alternative, if the current source is URL-addressable.
     pub selected_alternative: Option<PlaybackSourceAlternative>,
     /// A terminal failure, separate from recoverable play-policy rejection.
     pub source_failure: Option<PlaybackSourceFailure>,
+    /// Ordered initial URL failures, populated when no alternative becomes playable.
+    pub alternative_failures: Arc<[PlaybackAlternativeFailure]>,
     pub play_failure: Option<PlaybackPlayFailure>,
     /// Whole-source repeat preference, retained across source replacement and unload.
     pub repeat: bool,
@@ -274,6 +346,7 @@ impl Default for PlaybackSnapshot {
             readiness: PlaybackReadiness::Unavailable,
             selected_alternative: None,
             source_failure: None,
+            alternative_failures: Arc::from([]),
             play_failure: None,
             repeat: false,
             muted: false,
@@ -383,14 +456,23 @@ impl PlaybackLifecycle {
         self.snapshot.audibility_capability
     }
 
+    fn clear_source_failures(&mut self) {
+        self.snapshot.source_failure = None;
+        self.snapshot.alternative_failures = Arc::from([]);
+    }
+
+    fn clear_source_observations(&mut self) {
+        self.snapshot.selected_alternative = None;
+        self.clear_source_failures();
+        self.snapshot.play_failure = None;
+    }
+
     pub fn loading(&mut self) {
         self.status = PlaybackStatus::Loading;
         self.snapshot.source = PlaybackSourceLifecycle::Loading;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::LoadingMetadata;
-        self.snapshot.selected_alternative = None;
-        self.snapshot.source_failure = None;
-        self.snapshot.play_failure = None;
+        self.clear_source_observations();
     }
 
     pub fn dormant(&mut self) {
@@ -398,21 +480,29 @@ impl PlaybackLifecycle {
         self.snapshot.source = PlaybackSourceLifecycle::Dormant;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
-        self.snapshot.selected_alternative = None;
-        self.snapshot.source_failure = None;
-        self.snapshot.play_failure = None;
+        self.clear_source_observations();
     }
 
     pub fn loaded(&mut self) {
         self.status = PlaybackStatus::Ready;
         self.snapshot.source = PlaybackSourceLifecycle::Playable;
         self.snapshot.readiness = PlaybackReadiness::Metadata;
-        self.snapshot.source_failure = None;
+        self.clear_source_failures();
     }
 
     pub fn metadata_loaded(&mut self) {
         if self.snapshot.source == PlaybackSourceLifecycle::Loading {
             self.snapshot.readiness = PlaybackReadiness::Metadata;
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn loading_alternative(&mut self) {
+        if self.snapshot.source == PlaybackSourceLifecycle::Loading {
+            self.status = PlaybackStatus::Loading;
+            self.snapshot.readiness = PlaybackReadiness::LoadingMetadata;
+            self.clear_source_failures();
+            self.snapshot.play_failure = None;
         }
     }
 
@@ -422,7 +512,7 @@ impl PlaybackLifecycle {
             self.snapshot.source = PlaybackSourceLifecycle::Playable;
             self.snapshot.readiness = PlaybackReadiness::Playable;
             self.snapshot.selected_alternative = Some(alternative);
-            self.snapshot.source_failure = None;
+            self.clear_source_failures();
         }
     }
 
@@ -499,10 +589,8 @@ impl PlaybackLifecycle {
                 self.status = PlaybackStatus::Loading;
             } else {
                 self.snapshot.transport = PlaybackTransport::Paused;
+                self.status = PlaybackStatus::Paused;
             }
-        }
-        if matches!(self.status, PlaybackStatus::Playing) {
-            self.status = PlaybackStatus::Paused;
         }
     }
 
@@ -575,7 +663,18 @@ impl PlaybackLifecycle {
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
         self.snapshot.source_failure = Some(failure);
+        self.snapshot.alternative_failures = Arc::from([]);
         self.snapshot.play_failure = None;
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn source_exhausted(
+        &mut self,
+        failure: PlaybackSourceFailure,
+        alternative_failures: Vec<PlaybackAlternativeFailure>,
+    ) {
+        self.source_failed(failure);
+        self.snapshot.alternative_failures = alternative_failures.into();
     }
 
     pub fn unload(&mut self) {
@@ -583,9 +682,7 @@ impl PlaybackLifecycle {
         self.snapshot.source = PlaybackSourceLifecycle::Empty;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
-        self.snapshot.selected_alternative = None;
-        self.snapshot.source_failure = None;
-        self.snapshot.play_failure = None;
+        self.clear_source_observations();
     }
 }
 
@@ -741,6 +838,7 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
             readiness: PlaybackReadiness::Unavailable,
             selected_alternative: None,
             source_failure: Some(PlaybackSourceFailure::Unsupported(error)),
+            alternative_failures: Arc::from([]),
             play_failure: None,
             repeat: preferences.repeat,
             muted: preferences.muted,

@@ -10,9 +10,9 @@
 ## Features
 
 - **Recording:** microphone permissions, capture lifecycle, elapsed time, peaks, and live analysis.
-- **Playback:** Audio Data and URL-addressable Playback Sources, eager or on-play
-  loading, playback lifecycle, stop/reset, whole-source repeat, seeking, skipping,
-  and playback rate.
+- **Playback:** Audio Data and ordered URL-addressable Playback Source alternatives,
+  eager or on-play loading, playback lifecycle, stop/reset, whole-source repeat,
+  seeking, skipping, and playback rate.
 - **Audio input devices:** enumeration, selection, permission requests, and device-change handling.
 - **Analysis:** bounded reactive snapshots, interpretable waveform and spectrum
   data, RMS levels, peak reduction, and PCM range trimming.
@@ -243,9 +243,10 @@ fn Player() -> Element {
 The player creates and revokes browser object URLs for Audio Data as its source
 changes. Playback rate changes do not reload the source or reset its position.
 
-For URL-addressable media, construct one validated alternative with an optional
-media-type hint. Relative URLs are accepted; validation does not claim that the
-resource exists or that the browser can decode it.
+For URL-addressable media, construct one alternative or a non-empty ordered set.
+Each alternative is validated and can carry an optional media-type hint. Relative
+URLs are accepted; validation does not claim that a resource exists or that the
+browser can decode it.
 
 ```rust
 use dioxus_audio::playback::{
@@ -258,6 +259,31 @@ let source = PlaybackSource::url(alternative)
     .with_loading_policy(PlaybackLoadingPolicy::OnPlay);
 # Ok::<(), dioxus_audio::AudioError>(())
 ```
+
+Use `PlaybackSource::url_alternatives` when an application can offer multiple
+alternatives:
+
+```rust
+use dioxus_audio::playback::{PlaybackSource, PlaybackSourceAlternative};
+
+let source = PlaybackSource::url_alternatives([
+    PlaybackSourceAlternative::new("/media/episode.webm")?
+        .with_media_type("audio/webm; codecs=opus")?,
+    PlaybackSourceAlternative::new("/media/episode.mp3")?
+        .with_media_type("audio/mpeg")?,
+    PlaybackSourceAlternative::new("/media/episode")?,
+])?;
+# Ok::<(), dioxus_audio::AudioError>(())
+```
+
+Playback skips only media-type hints the browser reports as definitely
+unsupported. Untyped, `maybe`, and `probably` alternatives receive real load
+attempts in order. Metadata remains tentative; `canplay` selects and exposes the
+playable alternative. Initial failures continue to the next alternative, while a
+failure after selection is terminal and never switches media implicitly.
+If no alternative becomes playable, `PlaybackSnapshot::alternative_failures`
+reports each attempted or skipped alternative in order with an `unsupported`,
+`network`, `decode`, or `unknown` failure kind.
 
 `Eager` begins browser acquisition when the source becomes current. `OnPlay`
 keeps the source `Dormant` without an attached media resource until `play()` is

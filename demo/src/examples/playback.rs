@@ -12,7 +12,8 @@ use dioxus_audio::components::{
 };
 use dioxus_audio::playback::{
     PlaybackLoadingPolicy, PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure,
-    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTransport, use_audio_player,
+    PlaybackSourceFailureKind, PlaybackSourceLifecycle, PlaybackStatus, PlaybackTransport,
+    use_audio_player,
 };
 
 /// Lazily generate a two-second WAV tone when the player asks for its bytes.
@@ -135,6 +136,7 @@ pub fn UrlPlaybackExample() -> Element {
     let snapshot = controller.snapshot()();
     let eager_urls = application_urls.clone();
     let on_play_urls = application_urls.clone();
+    let alternative_urls = application_urls.clone();
     let replacement_urls = application_urls.clone();
     let selected_url = snapshot
         .selected_alternative
@@ -146,6 +148,12 @@ pub fn UrlPlaybackExample() -> Element {
         .as_ref()
         .and_then(PlaybackSourceAlternative::media_type)
         .unwrap_or("none");
+    let alternative_failures = snapshot
+        .alternative_failures
+        .iter()
+        .map(|failure| source_failure_kind_name(failure.kind()))
+        .collect::<Vec<_>>()
+        .join(",");
 
     rsx! {
         section {
@@ -154,7 +162,7 @@ pub fn UrlPlaybackExample() -> Element {
             aria_label: "URL Playback Source",
             h3 { class: "font-semibold", "Application-owned Playback Source" }
             p { class: "text-sm text-base-content/60",
-                "Switch between eager and genuinely dormant on-play loading of local browser media."
+                "Load one URL or let Playback select the first playable URL from ordered typed alternatives."
             }
             PlaybackStatusAnnouncer { controller }
             div {
@@ -165,8 +173,10 @@ pub fn UrlPlaybackExample() -> Element {
                 "data-selected-alternative": selected_url,
                 "data-selected-media-type": selected_media_type,
                 "data-source-failure": source_failure_name(snapshot.source_failure.as_ref()),
+                "data-alternative-failures": alternative_failures,
                 "data-play-failure": if snapshot.play_failure.is_some() { "present" } else { "none" },
                 "data-position": controller.position()().as_secs_f64().to_string(),
+                "data-duration": controller.duration()().as_secs_f64().to_string(),
             }
             div { class: "flex flex-wrap items-center gap-2",
                 PlaybackPlayPauseButton {
@@ -200,6 +210,15 @@ pub fn UrlPlaybackExample() -> Element {
                     class: "btn btn-ghost btn-xs",
                     r#type: "button",
                     onclick: move |_| {
+                        let playable_url = alternative_urls.create(sine_wave(440.0));
+                        source.set(Some(playback_url_alternatives(playable_url)));
+                    },
+                    "Load URL alternatives"
+                }
+                button {
+                    class: "btn btn-ghost btn-xs",
+                    r#type: "button",
+                    onclick: move |_| {
                         let url = replacement_urls.create(sine_wave(550.0));
                         source.set(Some(playback_url_source(url, PlaybackLoadingPolicy::Eager)));
                     },
@@ -224,6 +243,22 @@ fn playback_url_source(url: String, loading_policy: PlaybackLoadingPolicy) -> Pl
         .and_then(|alternative| alternative.with_media_type("audio/wav"))
         .expect("the local demo URL and media type are valid");
     PlaybackSource::url(alternative).with_loading_policy(loading_policy)
+}
+
+fn playback_url_alternatives(playable_url: String) -> PlaybackSource {
+    let unsupported = PlaybackSourceAlternative::new("/media/unsupported.alternative")
+        .and_then(|alternative| {
+            alternative.with_media_type("audio/x-dioxus-audio-definitely-unsupported")
+        })
+        .expect("the unsupported demo descriptor is valid");
+    let unavailable = PlaybackSourceAlternative::new("/media/unavailable-alternative.wav")
+        .expect("the untyped unavailable demo descriptor is valid");
+    let playable = PlaybackSourceAlternative::new(playable_url)
+        .and_then(|alternative| alternative.with_media_type("audio/wav"))
+        .expect("the local demo URL and media type are valid");
+
+    PlaybackSource::url_alternatives([unsupported, unavailable, playable])
+        .expect("the demo supplies a non-empty ordered alternative set")
 }
 
 fn source_lifecycle_name(source: &PlaybackSourceLifecycle) -> &'static str {
@@ -251,11 +286,17 @@ fn transport_name(transport: PlaybackTransport) -> &'static str {
 fn source_failure_name(failure: Option<&PlaybackSourceFailure>) -> &'static str {
     match failure {
         None => "none",
-        Some(PlaybackSourceFailure::Unsupported(_)) => "unsupported",
-        Some(PlaybackSourceFailure::Network(_)) => "network",
-        Some(PlaybackSourceFailure::Decode(_)) => "decode",
-        Some(PlaybackSourceFailure::Unknown(_)) => "unknown",
-        Some(_) => "unknown",
+        Some(failure) => source_failure_kind_name(failure.kind()),
+    }
+}
+
+fn source_failure_kind_name(kind: PlaybackSourceFailureKind) -> &'static str {
+    match kind {
+        PlaybackSourceFailureKind::Unsupported => "unsupported",
+        PlaybackSourceFailureKind::Network => "network",
+        PlaybackSourceFailureKind::Decode => "decode",
+        PlaybackSourceFailureKind::Unknown => "unknown",
+        _ => "unknown",
     }
 }
 

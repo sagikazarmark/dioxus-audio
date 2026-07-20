@@ -1,4 +1,5 @@
 import { expect, test } from "./fixtures";
+import type { Page } from "@playwright/test";
 
 type PlaybackTestWindow = typeof globalThis & {
   createdPlaybackElements?: HTMLMediaElement[];
@@ -9,6 +10,33 @@ type PlaybackTestWindow = typeof globalThis & {
   rejectPendingPlayback?: () => void;
   resolvePendingPlayback?: () => void;
 };
+
+async function holdAlternativeLoads(
+  page: Page,
+  supported: "maybe" | "probably",
+) {
+  await page.evaluate((supportedResult) => {
+    const held: HTMLMediaElement[] = [];
+    (window as PlaybackTestWindow).heldPlaybackElements = held;
+    HTMLMediaElement.prototype.canPlayType = function (mediaType: string) {
+      return mediaType === "audio/x-dioxus-audio-definitely-unsupported"
+        ? ""
+        : supportedResult;
+    };
+    Object.defineProperty(HTMLMediaElement.prototype, "src", {
+      configurable: true,
+      get() {
+        return this.getAttribute("data-held-src") ?? "";
+      },
+      set(value: string) {
+        this.setAttribute("data-held-src", value);
+        held.push(this);
+      },
+    });
+    HTMLMediaElement.prototype.load = function () {};
+    HTMLMediaElement.prototype.pause = function () {};
+  }, supported);
+}
 
 test("URL Playback Sources load eagerly or remain dormant until play", async ({
   openRoute,
@@ -94,6 +122,195 @@ test("URL Playback Sources load eagerly or remain dormant until play", async ({
   await example.getByRole("button", { name: "Unload URL Playback Source" }).click();
   await expect(state).toHaveAttribute("data-source", "empty");
   await expect(state).toHaveAttribute("data-selected-alternative", "none");
+});
+
+test("URL alternatives skip, fall back, select, and fail terminally", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback-source", "Load local and remote media by URL");
+  await holdAlternativeLoads(page, "probably");
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  await example.getByRole("button", { name: "Load URL alternatives" }).click();
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-selected-alternative", "none");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as PlaybackTestWindow).heldPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBe(1);
+  expect(
+    await page.evaluate(
+      () => (window as PlaybackTestWindow).heldPlaybackElements?.[0]?.src,
+    ),
+  ).toContain("unavailable-alternative.wav");
+
+  const first = await page.evaluateHandle(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[0],
+  );
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "duration", {
+      configurable: true,
+      value: 12,
+    });
+    element.dispatchEvent(new Event("loadedmetadata"));
+  }, first);
+  await expect(state).toHaveAttribute("data-readiness", "metadata");
+  await expect(state).toHaveAttribute("data-duration", "12");
+  await expect(state).toHaveAttribute("data-selected-alternative", "none");
+
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "error", {
+      configurable: true,
+      value: { code: 2 },
+    });
+    element.dispatchEvent(new Event("error"));
+    element.dispatchEvent(new Event("canplay"));
+  }, first);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as PlaybackTestWindow).heldPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBe(2);
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-selected-alternative", "none");
+  await expect(state).toHaveAttribute("data-duration", "2");
+
+  const selectedUrl = await page.evaluate(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[1]?.src ?? "",
+  );
+  expect(selectedUrl).toMatch(/^blob:/);
+  const second = await page.evaluateHandle(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[1],
+  );
+  await page.evaluate((element) => {
+    element.dispatchEvent(new Event("canplay"));
+  }, second);
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute("data-selected-alternative", selectedUrl);
+  await expect(state).toHaveAttribute("data-selected-media-type", "audio/wav");
+
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "error", {
+      configurable: true,
+      value: { code: 3 },
+    });
+    element.dispatchEvent(new Event("error"));
+  }, second);
+  await expect(state).toHaveAttribute("data-source", "failed");
+  await expect(state).toHaveAttribute("data-source-failure", "decode");
+  await expect(state).toHaveAttribute("data-selected-alternative", selectedUrl);
+  expect(
+    await page.evaluate(
+      () => (window as PlaybackTestWindow).heldPlaybackElements?.length,
+    ),
+  ).toBe(2);
+  await first.dispose();
+  await second.dispose();
+});
+
+test("URL alternative exhaustion reports ordered coarse failures", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback-source", "Load local and remote media by URL");
+  await holdAlternativeLoads(page, "maybe");
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  await example.getByRole("button", { name: "Load URL alternatives" }).click();
+
+  for (const [index, code] of [
+    [0, 2],
+    [1, 3],
+  ] as const) {
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as PlaybackTestWindow).heldPlaybackElements?.length ?? 0,
+        ),
+      )
+      .toBe(index + 1);
+    await page.evaluate(
+      ({ index, code }) => {
+        const element = (window as PlaybackTestWindow).heldPlaybackElements?.[index];
+        if (!element) return;
+        Object.defineProperty(element, "error", {
+          configurable: true,
+          value: { code },
+        });
+        element.dispatchEvent(new Event("error"));
+      },
+      { index, code },
+    );
+  }
+
+  await expect(state).toHaveAttribute("data-source", "failed");
+  await expect(state).toHaveAttribute("data-source-failure", "decode");
+  await expect(state).toHaveAttribute("data-selected-alternative", "none");
+  await expect(state).toHaveAttribute(
+    "data-alternative-failures",
+    "unsupported,network,decode",
+  );
+});
+
+test("replacement during URL fallback invalidates the failed attempt", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback-source", "Load local and remote media by URL");
+  await holdAlternativeLoads(page, "probably");
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  await example.getByRole("button", { name: "Load URL alternatives" }).click();
+  await expect(state).toHaveAttribute("data-source", "loading");
+
+  const first = await page.evaluateHandle(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[0],
+  );
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "error", {
+      configurable: true,
+      value: { code: 2 },
+    });
+    element.dispatchEvent(new Event("error"));
+    const replacement = Array.from(document.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Replace URL Playback Source"),
+    );
+    replacement?.click();
+    element.dispatchEvent(new Event("canplay"));
+  }, first);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as PlaybackTestWindow).heldPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBeGreaterThanOrEqual(2);
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-source-failure", "none");
+  await expect(state).toHaveAttribute("data-selected-alternative", "none");
+
+  const replacementUrl = await page.evaluate(() => {
+    const elements = (window as PlaybackTestWindow).heldPlaybackElements ?? [];
+    const replacement = elements[elements.length - 1];
+    replacement?.dispatchEvent(new Event("canplay"));
+    return replacement?.src ?? "";
+  });
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute(
+    "data-selected-alternative",
+    replacementUrl,
+  );
+  await expect(state).toHaveAttribute("data-source-failure", "none");
+  await first.dispose();
 });
 
 test("pausing a loading on-play URL clears only play intent", async ({

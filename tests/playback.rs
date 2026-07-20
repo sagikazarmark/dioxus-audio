@@ -11,16 +11,31 @@ use dioxus_audio::{AudioData, AudioError, AudioErrorKind};
 
 #[test]
 fn url_playback_source_validates_and_preserves_its_descriptor() {
-    let alternative = PlaybackSourceAlternative::new("/media/tone.wav")
+    let first = PlaybackSourceAlternative::new("/media/tone.mp3")
+        .unwrap()
+        .with_media_type("audio/mpeg")
+        .unwrap();
+    let second = PlaybackSourceAlternative::new("/media/tone.wav")
         .unwrap()
         .with_media_type("audio/wav")
         .unwrap();
-    assert_eq!(alternative.url(), "/media/tone.wav");
-    assert_eq!(alternative.media_type(), Some("audio/wav"));
+    let untyped = PlaybackSourceAlternative::new("/media/tone").unwrap();
+    assert_eq!(second.url(), "/media/tone.wav");
+    assert_eq!(second.media_type(), Some("audio/wav"));
 
     let source =
-        PlaybackSource::url(alternative).with_loading_policy(PlaybackLoadingPolicy::OnPlay);
+        PlaybackSource::url_alternatives(vec![first.clone(), second.clone(), untyped.clone()])
+            .unwrap()
+            .with_loading_policy(PlaybackLoadingPolicy::OnPlay);
     assert_eq!(source.loading_policy(), PlaybackLoadingPolicy::OnPlay);
+    assert_eq!(source.alternatives(), Some(&[first, second, untyped][..]));
+
+    let error = PlaybackSource::url_alternatives(Vec::new()).unwrap_err();
+    assert_eq!(error.kind(), AudioErrorKind::InvalidConfiguration);
+
+    let single = PlaybackSourceAlternative::new("/media/single.wav").unwrap();
+    let source = PlaybackSource::url(single.clone());
+    assert_eq!(source.alternatives(), Some(&[single][..]));
 
     for invalid in ["", "   ", "audio\nfile.wav"] {
         let error = PlaybackSourceAlternative::new(invalid).unwrap_err();
@@ -61,6 +76,7 @@ fn on_play_loading_can_be_paused_without_cancelling_the_source() {
     assert_eq!(playback.transport(), PlaybackTransport::Idle);
 
     playback.metadata_loaded();
+    assert_eq!(playback.selected_alternative(), None);
     playback.url_playable(alternative.clone());
     assert_eq!(playback.source(), &PlaybackSourceLifecycle::Playable);
     assert_eq!(playback.transport(), PlaybackTransport::Idle);
@@ -200,7 +216,7 @@ fn paused_playback_ignores_a_superseded_play_confirmation() {
     playback.ended();
 
     assert_eq!(playback.transport(), PlaybackTransport::Paused);
-    assert_eq!(playback.status(), &PlaybackStatus::Ready);
+    assert_eq!(playback.status(), &PlaybackStatus::Paused);
 }
 
 #[test]

@@ -1,29 +1,30 @@
 use dioxus_audio::recorder::{
     CompletionDisposition, RecorderConstraintCapabilities, RecorderLifecycle, RecorderOptions,
-    RecorderStatus, RecordingConstraint, RecordingConstraints, RecordingSourceSettings,
+    RecorderStatus, RecordingChunkDelivery, RecordingConstraint, RecordingConstraints,
+    RecordingOutcome, RecordingSourceSettings,
 };
-use dioxus_audio::{AudioError, AudioErrorKind};
+use dioxus_audio::{AudioError, AudioErrorKind, RecordingChunk};
 
 #[test]
 fn stopped_recording_completes_once_and_returns_to_idle() {
     let mut recorder = RecorderLifecycle::default();
 
-    let session = recorder.start().unwrap();
+    let recording_id = recorder.start().unwrap();
     assert_eq!(recorder.status(), &RecorderStatus::RequestingPermission);
-    assert!(recorder.started(session));
+    assert!(recorder.started(recording_id));
     assert_eq!(recorder.status(), &RecorderStatus::Recording);
 
     recorder.stop().unwrap();
     assert_eq!(recorder.status(), &RecorderStatus::Stopping);
     assert_eq!(
-        recorder.begin_finalize(session),
+        recorder.begin_finalize(recording_id),
         Some(CompletionDisposition::Save)
     );
     assert!(recorder.start().is_err());
     assert_eq!(recorder.status(), &RecorderStatus::Stopping);
-    assert!(recorder.complete_finalize(session));
+    assert!(recorder.complete_finalize(recording_id));
     assert_eq!(recorder.status(), &RecorderStatus::Idle);
-    assert_eq!(recorder.begin_finalize(session), None);
+    assert_eq!(recorder.begin_finalize(recording_id), None);
     assert!(recorder.start().is_err());
     recorder.clear_completed();
     assert!(recorder.start().is_ok());
@@ -32,32 +33,32 @@ fn stopped_recording_completes_once_and_returns_to_idle() {
 #[test]
 fn cancelled_recording_is_discarded() {
     let mut recorder = RecorderLifecycle::default();
-    let session = recorder.start().unwrap();
-    recorder.started(session);
+    let recording_id = recorder.start().unwrap();
+    recorder.started(recording_id);
 
     recorder.cancel().unwrap();
 
     assert_eq!(
-        recorder.begin_finalize(session),
+        recorder.begin_finalize(recording_id),
         Some(CompletionDisposition::Discard)
     );
-    assert!(recorder.complete_finalize(session));
+    assert!(recorder.complete_finalize(recording_id));
 }
 
 #[test]
 fn browser_initiated_stop_finalizes_the_partial_recording() {
     let mut recorder = RecorderLifecycle::default();
-    let session = recorder.start().unwrap();
-    recorder.started(session);
+    let recording_id = recorder.start().unwrap();
+    recorder.started(recording_id);
 
     assert_eq!(
-        recorder.begin_finalize(session),
+        recorder.begin_finalize(recording_id),
         Some(CompletionDisposition::Save)
     );
     assert_eq!(recorder.status(), &RecorderStatus::Stopping);
     assert!(recorder.stop().is_err());
     assert!(recorder.cancel().is_err());
-    assert!(recorder.complete_finalize(session));
+    assert!(recorder.complete_finalize(recording_id));
     assert_eq!(recorder.status(), &RecorderStatus::Idle);
 }
 
@@ -66,8 +67,8 @@ fn pause_and_resume_are_valid_only_during_recording() {
     let mut recorder = RecorderLifecycle::default();
     assert!(recorder.pause().is_err());
 
-    let session = recorder.start().unwrap();
-    recorder.started(session);
+    let recording_id = recorder.start().unwrap();
+    recorder.started(recording_id);
     recorder.pause().unwrap();
     assert_eq!(recorder.status(), &RecorderStatus::Paused);
     recorder.resume().unwrap();
@@ -75,7 +76,7 @@ fn pause_and_resume_are_valid_only_during_recording() {
 }
 
 #[test]
-fn stale_backend_events_cannot_replace_a_new_session() {
+fn stale_backend_events_cannot_replace_a_new_recording() {
     let mut recorder = RecorderLifecycle::default();
     let stale = recorder.start().unwrap();
     recorder.cancel().unwrap();
@@ -87,12 +88,104 @@ fn stale_backend_events_cannot_replace_a_new_session() {
 }
 
 #[test]
+fn recording_chunks_keep_identity_and_sequence_across_pause_resume_and_stop() {
+    let mut recorder = RecorderLifecycle::default();
+    let recording_id = recorder.start().unwrap();
+    recorder.started(recording_id);
+
+    let first = RecordingChunk {
+        recording_id,
+        sequence: recorder.next_chunk_sequence(recording_id).unwrap(),
+        bytes: vec![1, 2, 3],
+        media_type: "audio/webm;codecs=opus".to_string(),
+    };
+    recorder.pause().unwrap();
+    recorder.resume().unwrap();
+    let second = RecordingChunk {
+        recording_id,
+        sequence: recorder.next_chunk_sequence(recording_id).unwrap(),
+        bytes: vec![4, 5],
+        media_type: "audio/webm;codecs=opus".to_string(),
+    };
+    recorder.stop().unwrap();
+    let final_chunk = RecordingChunk {
+        recording_id,
+        sequence: recorder.next_chunk_sequence(recording_id).unwrap(),
+        bytes: vec![6],
+        media_type: "audio/webm;codecs=opus".to_string(),
+    };
+
+    assert_eq!(first.sequence, 0);
+    assert_eq!(second.sequence, 1);
+    assert_eq!(final_chunk.sequence, 2);
+    assert_eq!(first.recording_id, second.recording_id);
+    assert_eq!(second.recording_id, final_chunk.recording_id);
+    assert_eq!(first.bytes, vec![1, 2, 3]);
+    assert_eq!(first.media_type, "audio/webm;codecs=opus");
+
+    assert_eq!(
+        recorder.begin_finalize(recording_id),
+        Some(CompletionDisposition::Save)
+    );
+    assert!(recorder.complete_finalize(recording_id));
+    assert_eq!(recorder.next_chunk_sequence(recording_id), None);
+}
+
+#[test]
+fn discard_suppresses_chunks_and_a_restart_gets_new_identity_and_sequence() {
+    let mut recorder = RecorderLifecycle::default();
+    let discarded_id = recorder.start().unwrap();
+    recorder.started(discarded_id);
+    assert_eq!(recorder.next_chunk_sequence(discarded_id), Some(0));
+
+    recorder.cancel().unwrap();
+
+    assert_eq!(recorder.next_chunk_sequence(discarded_id), None);
+    assert_eq!(
+        recorder.begin_finalize(discarded_id),
+        Some(CompletionDisposition::Discard)
+    );
+    assert!(recorder.complete_finalize(discarded_id));
+
+    let restarted_id = recorder.start().unwrap();
+    assert_ne!(restarted_id, discarded_id);
+    recorder.started(restarted_id);
+    assert_eq!(recorder.next_chunk_sequence(restarted_id), Some(0));
+    assert_eq!(recorder.next_chunk_sequence(discarded_id), None);
+}
+
+#[test]
+fn recording_outcomes_expose_the_recording_identity() {
+    let mut recorder = RecorderLifecycle::default();
+    let recording_id = recorder.start().unwrap();
+    let error = AudioError::new(AudioErrorKind::RecorderFailure, "encoder stopped");
+
+    let completed = RecordingOutcome::Completed(recording_id);
+    let discarded = RecordingOutcome::Discarded(recording_id);
+    let failed = RecordingOutcome::Failed {
+        recording_id,
+        error: error.clone(),
+    };
+
+    assert_eq!(completed.recording_id(), recording_id);
+    assert_eq!(discarded.recording_id(), recording_id);
+    assert_eq!(failed.recording_id(), recording_id);
+    assert_eq!(
+        failed,
+        RecordingOutcome::Failed {
+            recording_id,
+            error,
+        }
+    );
+}
+
+#[test]
 fn backend_failures_are_observable_and_restartable() {
     let mut recorder = RecorderLifecycle::default();
-    let session = recorder.start().unwrap();
+    let recording_id = recorder.start().unwrap();
     let error = AudioError::new(AudioErrorKind::PermissionDenied, "microphone denied");
 
-    assert!(recorder.failed(session, error.clone()));
+    assert!(recorder.failed(recording_id, error.clone()));
     assert_eq!(recorder.status(), &RecorderStatus::Failed(error));
     assert!(recorder.start().is_ok());
 }
@@ -109,6 +202,13 @@ fn recorder_options_reject_invalid_analysis_configuration() {
 
     let mut options = RecorderOptions::default();
     options.peak_interval = std::time::Duration::ZERO;
+    assert!(options.validate().is_err());
+
+    let mut options = RecorderOptions::default();
+    options.chunk_delivery = Some(RecordingChunkDelivery::new(
+        std::time::Duration::ZERO,
+        |_| {},
+    ));
     assert!(options.validate().is_err());
 
     let mut recorder = RecorderLifecycle::default();

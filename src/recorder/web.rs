@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use web_sys::{
 use super::*;
 use crate::analysis::{AudioAnalyser, AudioAnalyserControl, peak_amplitude};
 use crate::devices::web::{audio_error_from_js, media_devices, stop_stream};
-use crate::{AudioData, AudioErrorKind};
+use crate::{AudioData, AudioErrorKind, RecordingChunk};
 
 pub(super) fn use_web_audio_recorder(
     options: RecorderOptions,
@@ -29,6 +30,7 @@ pub(super) fn use_web_audio_recorder(
     let mut constraint_capabilities = use_signal(|| None::<RecorderConstraintCapabilities>);
     let mut settings = use_signal(|| None::<RecordingSourceSettings>);
     let mut media_type = use_signal(|| None::<String>);
+    let mut outcome = use_signal(|| None::<RecordingOutcome>);
     let mut microphone = use_signal(|| MicrophoneStatus {
         permission: MicrophonePermission::Unknown,
         recorder: RecorderStatus::Idle,
@@ -67,8 +69,9 @@ pub(super) fn use_web_audio_recorder(
             return Err(command_error("invalid recorder options"));
         }
 
-        let session = runtime_for_start.borrow_mut().lifecycle.start()?;
+        let recording_id = runtime_for_start.borrow_mut().lifecycle.start()?;
         let input_device = selected_input();
+        outcome.set(None);
         requested_constraints.set(Some(options.constraints.clone()));
         settings.set(None);
         media_type.set(None);
@@ -95,8 +98,8 @@ pub(super) fn use_web_audio_recorder(
         let options = options.clone();
         let dioxus_runtime = dioxus_runtime.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = start_session(
-                session,
+            let result = start_recording(
+                recording_id,
                 input_device,
                 options.clone(),
                 &runtime,
@@ -107,6 +110,7 @@ pub(super) fn use_web_audio_recorder(
                 microphone,
                 settings,
                 media_type,
+                outcome,
                 dioxus_runtime.clone(),
                 dioxus_scope,
             )
@@ -123,17 +127,24 @@ pub(super) fn use_web_audio_recorder(
                 {
                     let runtime_for_timer = runtime.clone();
                     spawn(async move {
-                        run_timer(session, options.peak_interval, runtime_for_timer, elapsed).await;
+                        run_timer(
+                            recording_id,
+                            options.peak_interval,
+                            runtime_for_timer,
+                            elapsed,
+                        )
+                        .await;
                     });
                 }
                 Ok(()) => {}
                 Err(error) => fail_start(
-                    session,
+                    recording_id,
                     error,
                     &runtime,
                     &mut status,
                     &mut analyser,
                     &mut microphone,
+                    &mut outcome,
                 ),
             });
         });
@@ -144,9 +155,9 @@ pub(super) fn use_web_audio_recorder(
     let pause: Callback<(), Result<(), RecorderCommandError>> = use_callback(move |()| {
         let recorder = runtime_for_pause
             .borrow()
-            .session
+            .recording
             .as_ref()
-            .map(|session| session.recorder.clone())
+            .map(|recording| recording.recorder.clone())
             .ok_or_else(|| command_error("no active recorder"))?;
         recorder
             .pause()
@@ -169,9 +180,9 @@ pub(super) fn use_web_audio_recorder(
     let resume: Callback<(), Result<(), RecorderCommandError>> = use_callback(move |()| {
         let recorder = runtime_for_resume
             .borrow()
-            .session
+            .recording
             .as_ref()
-            .map(|session| session.recorder.clone())
+            .map(|recording| recording.recorder.clone())
             .ok_or_else(|| command_error("no active recorder"))?;
         recorder
             .resume()
@@ -198,6 +209,7 @@ pub(super) fn use_web_audio_recorder(
             &mut analyser,
             &mut elapsed,
             &mut microphone,
+            &mut outcome,
         )
     });
 
@@ -210,6 +222,7 @@ pub(super) fn use_web_audio_recorder(
             &mut analyser,
             &mut elapsed,
             &mut microphone,
+            &mut outcome,
         )
     });
 
@@ -237,6 +250,7 @@ pub(super) fn use_web_audio_recorder(
         constraint_capabilities: constraint_capabilities.into(),
         settings: settings.into(),
         media_type: media_type.into(),
+        outcome: outcome.into(),
         start,
         pause,
         resume,
@@ -249,7 +263,7 @@ pub(super) fn use_web_audio_recorder(
 
 struct Runtime {
     lifecycle: RecorderLifecycle,
-    session: Option<WebSession>,
+    recording: Option<WebRecording>,
     elapsed_ms: f64,
     segment_started_at: Option<f64>,
     last_peak_at: f64,
@@ -264,7 +278,7 @@ impl Default for Runtime {
     fn default() -> Self {
         Self {
             lifecycle: RecorderLifecycle::default(),
-            session: None,
+            recording: None,
             elapsed_ms: 0.0,
             segment_started_at: None,
             last_peak_at: 0.0,
@@ -285,6 +299,167 @@ impl Runtime {
     }
 }
 
+#[derive(Clone)]
+struct ChunkDelivery {
+    state: Rc<RefCell<ChunkDeliveryState>>,
+}
+
+struct ChunkDeliveryState {
+    configuration: RecordingChunkDelivery,
+    dioxus_runtime: Rc<DioxusRuntime>,
+    dioxus_scope: ScopeId,
+    pending: VecDeque<PendingChunk>,
+    worker_active: bool,
+    enabled: bool,
+    drain_waiters: Vec<js_sys::Function>,
+}
+
+struct PendingChunk {
+    recording_id: RecordingId,
+    sequence: u64,
+    blob: Blob,
+    media_type: String,
+}
+
+impl ChunkDelivery {
+    fn new(
+        configuration: RecordingChunkDelivery,
+        dioxus_runtime: Rc<DioxusRuntime>,
+        dioxus_scope: ScopeId,
+    ) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(ChunkDeliveryState {
+                configuration,
+                dioxus_runtime,
+                dioxus_scope,
+                pending: VecDeque::new(),
+                worker_active: false,
+                enabled: true,
+                drain_waiters: Vec::new(),
+            })),
+        }
+    }
+
+    fn enqueue(&self, chunk: PendingChunk) {
+        let should_start = {
+            let mut state = self.state.borrow_mut();
+            if !state.enabled {
+                return;
+            }
+            state.pending.push_back(chunk);
+            if state.worker_active {
+                false
+            } else {
+                state.worker_active = true;
+                true
+            }
+        };
+        if should_start {
+            wasm_bindgen_futures::spawn_local(deliver_chunks(self.state.clone()));
+        }
+    }
+
+    fn invalidate(&self) {
+        let waiters = {
+            let mut state = self.state.borrow_mut();
+            state.enabled = false;
+            state.pending.clear();
+            std::mem::take(&mut state.drain_waiters)
+        };
+        resolve_waiters(waiters);
+    }
+
+    async fn wait_until_drained(&self) {
+        let state = self.state.clone();
+        let promise = js_sys::Promise::new(&mut move |resolve, _| {
+            let resolve_now = {
+                let mut state = state.borrow_mut();
+                if !state.enabled || (!state.worker_active && state.pending.is_empty()) {
+                    true
+                } else {
+                    state.drain_waiters.push(resolve.clone());
+                    false
+                }
+            };
+            if resolve_now {
+                let _ = resolve.call0(&JsValue::UNDEFINED);
+            }
+        });
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
+
+async fn deliver_chunks(state: Rc<RefCell<ChunkDeliveryState>>) {
+    loop {
+        let pending = {
+            let mut state = state.borrow_mut();
+            if state.enabled {
+                state.pending.pop_front()
+            } else {
+                state.pending.clear();
+                None
+            }
+        };
+        let Some(pending) = pending else {
+            let waiters = {
+                let mut state = state.borrow_mut();
+                state.worker_active = false;
+                std::mem::take(&mut state.drain_waiters)
+            };
+            resolve_waiters(waiters);
+            return;
+        };
+
+        let bytes = match blob_to_owned_bytes(&pending.blob).await {
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            _ => {
+                let waiters = {
+                    let mut state = state.borrow_mut();
+                    state.enabled = false;
+                    state.pending.clear();
+                    state.worker_active = false;
+                    std::mem::take(&mut state.drain_waiters)
+                };
+                resolve_waiters(waiters);
+                return;
+            }
+        };
+        let callback = {
+            let state = state.borrow();
+            state.enabled.then(|| {
+                (
+                    state.configuration.clone(),
+                    state.dioxus_runtime.clone(),
+                    state.dioxus_scope,
+                )
+            })
+        };
+        if let Some((callback, dioxus_runtime, dioxus_scope)) = callback {
+            dioxus_runtime.in_scope(dioxus_scope, || {
+                callback.call(RecordingChunk {
+                    recording_id: pending.recording_id,
+                    sequence: pending.sequence,
+                    bytes,
+                    media_type: pending.media_type,
+                });
+            });
+        }
+    }
+}
+
+fn resolve_waiters(waiters: Vec<js_sys::Function>) {
+    for resolve in waiters {
+        let _ = resolve.call0(&JsValue::UNDEFINED);
+    }
+}
+
+async fn blob_to_owned_bytes(blob: &Blob) -> Result<Vec<u8>, AudioError> {
+    let buffer = wasm_bindgen_futures::JsFuture::from(blob.array_buffer())
+        .await
+        .map_err(audio_error_from_js)?;
+    Ok(Uint8Array::new(&buffer).to_vec())
+}
+
 struct UnmountGuard(Weak<RefCell<Runtime>>);
 
 impl Drop for UnmountGuard {
@@ -292,8 +467,8 @@ impl Drop for UnmountGuard {
         if let Some(runtime) = self.0.upgrade() {
             let mut runtime = runtime.borrow_mut();
             runtime.mounted = false;
-            runtime.session.take();
-            runtime.lifecycle.active_session = None;
+            runtime.recording.take();
+            runtime.lifecycle.abandon();
         }
     }
 }
@@ -332,13 +507,14 @@ impl Drop for PendingCapture {
     }
 }
 
-struct WebSession {
+struct WebRecording {
     recorder: MediaRecorder,
     stream: MediaStream,
     context: AudioContext,
     _source: MediaStreamAudioSourceNode,
     analyser: AudioAnalyserControl,
     chunks: Rc<RefCell<Vec<Blob>>>,
+    chunk_delivery: Option<ChunkDelivery>,
     _on_data: Closure<dyn FnMut(BlobEvent)>,
     _on_stop: Closure<dyn FnMut()>,
     _on_error: Closure<dyn FnMut()>,
@@ -348,8 +524,11 @@ struct WebSession {
     on_ended: Closure<dyn FnMut()>,
 }
 
-impl Drop for WebSession {
+impl Drop for WebRecording {
     fn drop(&mut self) {
+        if let Some(delivery) = &self.chunk_delivery {
+            delivery.invalidate();
+        }
         self.analyser.set_available(false);
         self.recorder.set_ondataavailable(None);
         self.recorder.set_onstop(None);
@@ -369,8 +548,8 @@ impl Drop for WebSession {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn start_session(
-    session_id: RecordingSessionId,
+async fn start_recording(
+    recording_id: RecordingId,
     input_device: Option<AudioInputId>,
     options: RecorderOptions,
     runtime: &Rc<RefCell<Runtime>>,
@@ -381,12 +560,15 @@ async fn start_session(
     mut microphone: Signal<MicrophoneStatus>,
     mut settings_signal: Signal<Option<RecordingSourceSettings>>,
     mut media_type_signal: Signal<Option<String>>,
+    mut outcome_signal: Signal<Option<RecordingOutcome>>,
     dioxus_runtime: Rc<DioxusRuntime>,
     dioxus_scope: ScopeId,
 ) -> Result<(), AudioError> {
     let stream = acquire_stream(input_device.as_ref(), &options.constraints).await?;
     let mut pending = PendingCapture::new(stream);
-    if !runtime.borrow().mounted || runtime.borrow().lifecycle.active_session != Some(session_id) {
+    if !runtime.borrow().mounted
+        || runtime.borrow().lifecycle.active_recording != Some(recording_id)
+    {
         return Ok(());
     }
 
@@ -444,6 +626,10 @@ async fn start_session(
         })?;
     let settings = read_settings(&track);
     let chunks = Rc::new(RefCell::new(Vec::<Blob>::new()));
+    let chunk_delivery = options
+        .chunk_delivery
+        .clone()
+        .map(|delivery| ChunkDelivery::new(delivery, dioxus_runtime.clone(), dioxus_scope));
     let start_resolver = Rc::new(RefCell::new(None::<js_sys::Function>));
     let resolver_for_promise = start_resolver.clone();
     let start_promise = js_sys::Promise::new(&mut move |resolve, _| {
@@ -459,11 +645,28 @@ async fn start_session(
     recorder.set_onstart(Some(on_start.as_ref().unchecked_ref()));
 
     let chunks_for_data = chunks.clone();
+    let delivery_for_data = chunk_delivery.clone();
+    let runtime_for_data = Rc::downgrade(runtime);
+    let recorder_for_data = recorder.clone();
     let on_data = Closure::wrap(Box::new(move |event: BlobEvent| {
         if let Some(blob) = event.data()
             && blob.size() > 0.0
         {
-            chunks_for_data.borrow_mut().push(blob);
+            chunks_for_data.borrow_mut().push(blob.clone());
+            let sequence = runtime_for_data.upgrade().and_then(|runtime| {
+                runtime
+                    .borrow_mut()
+                    .lifecycle
+                    .next_chunk_sequence(recording_id)
+            });
+            if let (Some(delivery), Some(sequence)) = (&delivery_for_data, sequence) {
+                delivery.enqueue(PendingChunk {
+                    recording_id,
+                    sequence,
+                    blob,
+                    media_type: recorder_for_data.mime_type(),
+                });
+            }
         }
     }) as Box<dyn FnMut(BlobEvent)>);
     recorder.set_ondataavailable(Some(on_data.as_ref().unchecked_ref()));
@@ -478,7 +681,16 @@ async fn start_session(
             let Some(runtime) = runtime_for_stop.upgrade() else {
                 return;
             };
-            let (disposition, terminal_error, chunks, duration, peaks, selected_device, mime_type) = {
+            let (
+                disposition,
+                terminal_error,
+                chunks,
+                chunk_delivery,
+                duration,
+                peaks,
+                selected_device,
+                mime_type,
+            ) = {
                 let mut runtime = runtime.borrow_mut();
                 if matches!(
                     runtime.lifecycle.status(),
@@ -486,15 +698,19 @@ async fn start_session(
                 ) {
                     runtime.accumulate_elapsed();
                 }
-                let disposition = runtime.lifecycle.begin_finalize(session_id);
+                let disposition = runtime.lifecycle.begin_finalize(recording_id);
                 (
                     disposition,
                     runtime.terminal_error.take(),
                     runtime
-                        .session
+                        .recording
                         .as_ref()
-                        .map(|session| session.chunks.borrow().clone())
+                        .map(|recording| recording.chunks.borrow().clone())
                         .unwrap_or_default(),
+                    runtime
+                        .recording
+                        .as_ref()
+                        .and_then(|recording| recording.chunk_delivery.clone()),
                     duration_from_ms(runtime.elapsed_ms),
                     runtime.peaks.clone(),
                     runtime.selected_device.clone(),
@@ -514,28 +730,38 @@ async fn start_session(
 
             spawn(async move {
                 gloo_timers::future::TimeoutFuture::new(0).await;
-                runtime.borrow_mut().session.take();
+                if terminal_error.is_none()
+                    && disposition == CompletionDisposition::Save
+                    && let Some(delivery) = &chunk_delivery
+                {
+                    delivery.wait_until_drained().await;
+                }
+                if !runtime.borrow().mounted {
+                    return;
+                }
+                runtime.borrow_mut().recording.take();
 
                 if let Some(error) = terminal_error {
-                    let mut runtime = runtime.borrow_mut();
-                    runtime.lifecycle.failed(session_id, error.clone());
-                    runtime.muted = false;
-                    drop(runtime);
-                    status.set(RecorderStatus::Failed(error.clone()));
-                    microphone.set(MicrophoneStatus {
-                        permission: MicrophonePermission::Granted,
-                        recorder: RecorderStatus::Failed(error),
-                        input_device: selected_device,
-                        muted: false,
-                    });
+                    publish_recording_failure(
+                        recording_id,
+                        error,
+                        &runtime,
+                        &mut status,
+                        &mut microphone,
+                        &mut outcome_signal,
+                        MicrophonePermission::Granted,
+                    );
                     return;
                 }
 
                 if disposition == CompletionDisposition::Discard {
                     let mut runtime = runtime.borrow_mut();
-                    runtime.lifecycle.complete_finalize(session_id);
+                    if !runtime.lifecycle.complete_finalize(recording_id) || !runtime.mounted {
+                        return;
+                    }
                     runtime.muted = false;
                     drop(runtime);
+                    outcome_signal.set(Some(RecordingOutcome::Discarded(recording_id)));
                     status.set(RecorderStatus::Idle);
                     microphone.set(MicrophoneStatus {
                         permission: MicrophonePermission::Granted,
@@ -549,15 +775,19 @@ async fn start_session(
                 match collect_audio(chunks, mime_type).await {
                     Ok(audio) => {
                         let mut runtime = runtime.borrow_mut();
-                        runtime.lifecycle.complete_finalize(session_id);
+                        if !runtime.lifecycle.complete_finalize(recording_id) || !runtime.mounted {
+                            return;
+                        }
                         runtime.muted = false;
                         drop(runtime);
                         completed.set(Some(RecordedAudio {
+                            recording_id,
                             audio,
                             duration,
                             peaks,
                             input_device: selected_device.clone(),
                         }));
+                        outcome_signal.set(Some(RecordingOutcome::Completed(recording_id)));
                         status.set(RecorderStatus::Idle);
                         microphone.set(MicrophoneStatus {
                             permission: MicrophonePermission::Granted,
@@ -567,17 +797,15 @@ async fn start_session(
                         });
                     }
                     Err(error) => {
-                        let mut runtime = runtime.borrow_mut();
-                        runtime.lifecycle.failed(session_id, error.clone());
-                        runtime.muted = false;
-                        drop(runtime);
-                        status.set(RecorderStatus::Failed(error.clone()));
-                        microphone.set(MicrophoneStatus {
-                            permission: MicrophonePermission::Granted,
-                            recorder: RecorderStatus::Failed(error),
-                            input_device: selected_device,
-                            muted: false,
-                        });
+                        publish_recording_failure(
+                            recording_id,
+                            error,
+                            &runtime,
+                            &mut status,
+                            &mut microphone,
+                            &mut outcome_signal,
+                            MicrophonePermission::Granted,
+                        );
                     }
                 }
             });
@@ -596,13 +824,20 @@ async fn start_session(
             };
             let should_finalize = {
                 let mut runtime = runtime.borrow_mut();
-                let active = runtime.lifecycle.active_session == Some(session_id);
+                let active = runtime.lifecycle.active_recording == Some(recording_id);
                 let status = runtime.lifecycle.status().clone();
                 if active
                     && (matches!(status, RecorderStatus::Recording | RecorderStatus::Paused)
                         || (matches!(status, RecorderStatus::Stopping)
                             && runtime.lifecycle.completion == CompletionDisposition::Save))
                 {
+                    if let Some(delivery) = runtime
+                        .recording
+                        .as_ref()
+                        .and_then(|recording| recording.chunk_delivery.as_ref())
+                    {
+                        delivery.invalidate();
+                    }
                     runtime.terminal_error = Some(AudioError::new(
                         AudioErrorKind::RecorderFailure,
                         "media recorder failed",
@@ -698,7 +933,12 @@ async fn start_session(
     let _ = track.add_event_listener_with_callback("ended", on_ended.as_ref().unchecked_ref());
 
     let initially_muted = track.muted();
-    if let Err(error) = recorder.start() {
+    let start_result = if let Some(delivery) = options.chunk_delivery.as_ref() {
+        recorder.start_with_time_slice(delivery.time_slice_millis())
+    } else {
+        recorder.start()
+    };
+    if let Err(error) = start_result {
         recorder.set_onstart(None);
         return Err(audio_error_from_js(error));
     }
@@ -716,13 +956,14 @@ async fn start_session(
     let (analyser_control, analyser) =
         AudioAnalyserControl::new(analyser_node, context.sample_rate());
     analyser_control.set_available(true);
-    let session = WebSession {
+    let recording = WebRecording {
         recorder,
         stream,
         context,
         _source: source,
         analyser: analyser_control,
         chunks,
+        chunk_delivery,
         _on_data: on_data,
         _on_stop: on_stop,
         _on_error: on_error,
@@ -733,15 +974,15 @@ async fn start_session(
     };
 
     let mut runtime_mut = runtime.borrow_mut();
-    if !runtime_mut.lifecycle.started(session_id) || !runtime_mut.mounted {
+    if !runtime_mut.lifecycle.started(recording_id) || !runtime_mut.mounted {
         drop(runtime_mut);
-        drop(session);
+        drop(recording);
         return Ok(());
     }
     runtime_mut.segment_started_at = Some(now_ms());
     runtime_mut.last_peak_at = now_ms();
     runtime_mut.muted = initially_muted;
-    runtime_mut.session = Some(session);
+    runtime_mut.recording = Some(recording);
     drop(runtime_mut);
 
     dioxus_runtime.in_scope(dioxus_scope, || {
@@ -898,7 +1139,7 @@ fn settle_start(resolver: &Rc<RefCell<Option<js_sys::Function>>>) {
 }
 
 async fn run_timer(
-    session_id: RecordingSessionId,
+    recording_id: RecordingId,
     peak_interval: Duration,
     runtime: Rc<RefCell<Runtime>>,
     mut elapsed: Signal<Duration>,
@@ -906,7 +1147,7 @@ async fn run_timer(
     loop {
         gloo_timers::future::TimeoutFuture::new(30).await;
         let mut runtime = runtime.borrow_mut();
-        if runtime.lifecycle.active_session != Some(session_id) {
+        if runtime.lifecycle.active_recording != Some(recording_id) {
             break;
         }
         if !matches!(runtime.lifecycle.status(), RecorderStatus::Recording) {
@@ -923,9 +1164,9 @@ async fn run_timer(
 
         if now - runtime.last_peak_at >= peak_interval.as_secs_f64() * 1000.0 {
             runtime.last_peak_at = now;
-            if let Some(session) = runtime.session.as_ref() {
-                let mut samples = vec![0_u8; session.analyser.node().fft_size() as usize];
-                session
+            if let Some(recording) = runtime.recording.as_ref() {
+                let mut samples = vec![0_u8; recording.analyser.node().fft_size() as usize];
+                recording
                     .analyser
                     .node()
                     .get_byte_time_domain_data(&mut samples);
@@ -943,15 +1184,29 @@ fn stop_or_cancel(
     analyser: &mut Signal<Option<AudioAnalyser>>,
     elapsed: &mut Signal<Duration>,
     microphone: &mut Signal<MicrophoneStatus>,
+    outcome: &mut Signal<Option<RecordingOutcome>>,
 ) -> Result<(), RecorderCommandError> {
     let mut runtime_mut = runtime.borrow_mut();
+    let cancelled_recording = cancel
+        .then_some(runtime_mut.lifecycle.active_recording)
+        .flatten();
     if cancel {
         runtime_mut.lifecycle.cancel()?;
+        if let Some(delivery) = runtime_mut
+            .recording
+            .as_ref()
+            .and_then(|recording| recording.chunk_delivery.as_ref())
+        {
+            delivery.invalidate();
+        }
     } else {
         runtime_mut.lifecycle.stop()?;
     }
 
     if matches!(runtime_mut.lifecycle.status(), RecorderStatus::Idle) {
+        if let Some(recording_id) = cancelled_recording {
+            outcome.set(Some(RecordingOutcome::Discarded(recording_id)));
+        }
         status.set(RecorderStatus::Idle);
         microphone.set(MicrophoneStatus {
             permission: MicrophonePermission::Unknown,
@@ -965,9 +1220,9 @@ fn stop_or_cancel(
     runtime_mut.accumulate_elapsed();
     elapsed.set(duration_from_ms(runtime_mut.elapsed_ms));
     let recorder = runtime_mut
-        .session
+        .recording
         .as_ref()
-        .map(|session| session.recorder.clone())
+        .map(|recording| recording.recorder.clone())
         .ok_or_else(|| command_error("no active recorder"))?;
     drop(runtime_mut);
     publish_status(runtime, status, microphone, MicrophonePermission::Granted);
@@ -976,53 +1231,82 @@ fn stop_or_cancel(
             AudioErrorKind::RecorderFailure,
             "browser rejected recording stop",
         );
-        let mut runtime = runtime.borrow_mut();
-        if let Some(session) = runtime.lifecycle.active_session {
-            runtime.lifecycle.failed(session, error.clone());
+        let recording_id = runtime.borrow().lifecycle.active_recording;
+        if let Some(recording_id) = recording_id {
+            publish_recording_failure(
+                recording_id,
+                error.clone(),
+                runtime,
+                status,
+                microphone,
+                outcome,
+                MicrophonePermission::Granted,
+            );
         }
-        runtime.session.take();
-        let selected_device = runtime.selected_device.clone();
-        drop(runtime);
         analyser.set(None);
-        status.set(RecorderStatus::Failed(error.clone()));
-        microphone.set(MicrophoneStatus {
-            permission: MicrophonePermission::Granted,
-            recorder: RecorderStatus::Failed(error),
-            input_device: selected_device,
-            muted: false,
-        });
         return Err(command_error("browser rejected stop"));
     }
     Ok(())
 }
 
 fn fail_start(
-    session: RecordingSessionId,
+    recording_id: RecordingId,
     error: AudioError,
     runtime: &Rc<RefCell<Runtime>>,
     status: &mut Signal<RecorderStatus>,
     analyser: &mut Signal<Option<AudioAnalyser>>,
     microphone: &mut Signal<MicrophoneStatus>,
+    outcome: &mut Signal<Option<RecordingOutcome>>,
 ) {
-    if runtime
-        .borrow_mut()
-        .lifecycle
-        .failed(session, error.clone())
-    {
-        runtime.borrow_mut().session.take();
+    let permission = if error.kind() == AudioErrorKind::PermissionDenied {
+        MicrophonePermission::Denied
+    } else {
+        MicrophonePermission::Unknown
+    };
+    if publish_recording_failure(
+        recording_id,
+        error,
+        runtime,
+        status,
+        microphone,
+        outcome,
+        permission,
+    ) {
         analyser.set(None);
-        status.set(RecorderStatus::Failed(error.clone()));
-        microphone.set(MicrophoneStatus {
-            permission: if error.kind() == AudioErrorKind::PermissionDenied {
-                MicrophonePermission::Denied
-            } else {
-                MicrophonePermission::Unknown
-            },
-            recorder: RecorderStatus::Failed(error),
-            input_device: runtime.borrow().selected_device.clone(),
-            muted: false,
-        });
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_recording_failure(
+    recording_id: RecordingId,
+    error: AudioError,
+    runtime: &Rc<RefCell<Runtime>>,
+    status: &mut Signal<RecorderStatus>,
+    microphone: &mut Signal<MicrophoneStatus>,
+    outcome: &mut Signal<Option<RecordingOutcome>>,
+    permission: MicrophonePermission,
+) -> bool {
+    let input_device = {
+        let mut runtime = runtime.borrow_mut();
+        if !runtime.mounted || !runtime.lifecycle.failed(recording_id, error.clone()) {
+            return false;
+        }
+        runtime.muted = false;
+        runtime.recording.take();
+        runtime.selected_device.clone()
+    };
+    outcome.set(Some(RecordingOutcome::Failed {
+        recording_id,
+        error: error.clone(),
+    }));
+    status.set(RecorderStatus::Failed(error.clone()));
+    microphone.set(MicrophoneStatus {
+        permission,
+        recorder: RecorderStatus::Failed(error),
+        input_device,
+        muted: false,
+    });
+    true
 }
 
 fn publish_status(

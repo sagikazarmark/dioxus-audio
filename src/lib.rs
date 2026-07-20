@@ -11,4 +11,6 @@ mod types;
 pub mod waveform;
 
 pub use error::{AudioError, AudioErrorKind};
-pub use types::{AudioData, AudioInputDevice, AudioInputId, RecordedAudio};
+pub use types::{
+    AudioData, AudioInputDevice, AudioInputId, RecordedAudio, RecordingChunk, RecordingId,
+};

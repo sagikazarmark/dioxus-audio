@@ -18,6 +18,27 @@ impl AudioData {
     }
 }
 
+/// Opaque identity assigned to one Recording by its Recorder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RecordingId(u64);
+
+impl RecordingId {
+    pub(crate) fn from_generation(generation: u64) -> Self {
+        Self(generation)
+    }
+}
+
+/// An ordered encoded fragment emitted during a Recording.
+///
+/// A Recording Chunk is not guaranteed to be independently playable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordingChunk {
+    pub recording_id: RecordingId,
+    pub sequence: u64,
+    pub bytes: Vec<u8>,
+    pub media_type: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AudioInputId(String);
 
@@ -64,6 +85,7 @@ impl AudioInputDevice {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedAudio {
+    pub recording_id: RecordingId,
     pub audio: AudioData,
     pub duration: Duration,
     pub peaks: Vec<u8>,

@@ -9,7 +9,8 @@
 
 ## Features
 
-- **Recording:** microphone permissions, capture lifecycle, elapsed time, peaks, and live analysis.
+- **Recording:** microphone permissions, capture lifecycle, ordered Recording
+  Chunks, elapsed time, peaks, and live analysis.
 - **Playback:** Audio Data and ordered URL-addressable Playback Source alternatives,
   eager or on-play loading, playback lifecycle, stop/reset, whole-source repeat,
   network and readiness observations, buffered and seekable ranges, seeking,
@@ -123,6 +124,46 @@ starts. `is_recorder_mime_type_supported()` can be used before starting to probe
 a candidate format, but a positive probe only means the browser recognizes the
 type. It does not guarantee source acquisition, Recorder construction, or a
 successful Recording.
+
+Recording Chunk delivery is opt-in and supplements the final `RecordedAudio`:
+
+```rust
+use std::time::Duration;
+use dioxus_audio::RecordingChunk;
+use dioxus_audio::recorder::RecordingChunkDelivery;
+
+let mut pending_chunks = use_signal(Vec::<RecordingChunk>::new);
+let mut options = RecorderOptions::default();
+options.chunk_delivery = Some(RecordingChunkDelivery::new(
+    Duration::from_millis(250),
+    move |chunk: RecordingChunk| {
+        // Move the owned bytes into application-managed upload or persistence work.
+        pending_chunks.write().push(chunk);
+    },
+));
+
+let recorder = use_audio_recorder(options, devices.selected().into());
+```
+
+The accepted `start()` snapshots the delivery configuration and selected encoder
+preferences. Cadence is approximate: browsers choose actual fragment boundaries
+and may produce no data at a boundary. Every delivered chunk owns non-empty
+encoded bytes and carries the effective media type, a Recorder-local
+`RecordingId`, and a zero-based contiguous sequence. Chunks are delivered
+serially in browser event order and are not guaranteed to be independently
+playable.
+
+Callback return hands the chunk to the application; the library does not add an
+upload, persistence, retry, acknowledgement, or backpressure queue. Recorder
+still retains every browser fragment needed for final `RecordedAudio`, so chunk
+delivery does not reduce completion memory. On success, all final chunks are
+delivered before `recorder.completed()` becomes populated. Discard and unmount
+suppress output that has not already been handed off.
+
+`RecordedAudio::recording_id` correlates completion with its chunks.
+`recorder.outcome()` exposes the same ID for completed, discarded, and failed
+Recordings; configuration rejected before `start()` is accepted has no Recording
+outcome.
 
 ## Live Analysis
 

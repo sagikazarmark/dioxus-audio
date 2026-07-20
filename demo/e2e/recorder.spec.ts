@@ -7,6 +7,8 @@ test("a recording can be paused, resumed, completed, and played", async ({
   await page.addInitScript(() => {
     const browser = globalThis as typeof globalThis & {
       capturedRecorderConstraints?: MediaStreamConstraints[];
+      activeChunkConversions?: number;
+      maxChunkConversions?: number;
     };
     const mediaDevices = navigator.mediaDevices;
     const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
@@ -16,6 +18,21 @@ test("a recording can be paused, resumed, completed, and played", async ({
         return getUserMedia(constraints);
       },
     });
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = async function () {
+      browser.activeChunkConversions =
+        (browser.activeChunkConversions ?? 0) + 1;
+      browser.maxChunkConversions = Math.max(
+        browser.maxChunkConversions ?? 0,
+        browser.activeChunkConversions,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      try {
+        return await arrayBuffer.call(this);
+      } finally {
+        browser.activeChunkConversions -= 1;
+      }
+    };
   });
   await openRoute("/recorder", "Capture, inspect, and replay");
   const demo = page.getByRole("region", { name: "Example demo" });
@@ -49,6 +66,27 @@ test("a recording can be paused, resumed, completed, and played", async ({
   ).toBeVisible();
   await expect(demo.getByText(/Effective sample rate: \d+ Hz/)).toBeVisible();
   await expect(demo.getByText(/Selected media type: audio\//)).toBeVisible();
+  const selectedMediaType = (
+    await demo.getByText(/Selected media type: audio\//).textContent()
+  )?.replace("Selected media type: ", "");
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Primary chunk"),
+      ).length,
+    )
+    .toBeGreaterThan(0);
+  const chunksBeforePause = (
+    await lifecycle.locator("li").allTextContents()
+  ).filter((event) => event.startsWith("Primary chunk")).length;
+  await demo
+    .getByRole("button", {
+      name: "Use alternate chunk callback for future recordings",
+    })
+    .click();
 
   const pause = demo.getByRole("button", { name: "Pause", exact: true });
   await expect(pause).toBeVisible();
@@ -68,6 +106,44 @@ test("a recording can be paused, resumed, completed, and played", async ({
   await expect(completed).toContainText(
     /\d+:\d{2} \| audio\/[^|]+ \| [1-9]\d* bytes/,
   );
+
+  const firstRecordingEvents = await lifecycle.locator("li").allTextContents();
+  const firstChunks = firstRecordingEvents
+    .map((event) =>
+      event.match(
+        /^Primary chunk \| (Recorder \d+ Recording \d+) \| sequence (\d+) \| bytes (\d+) \| (audio\/.+)$/,
+      ),
+    )
+    .filter((match): match is RegExpMatchArray => match !== null);
+  expect(firstChunks.length).toBeGreaterThan(1);
+  expect(firstChunks.length).toBeGreaterThan(chunksBeforePause);
+  expect(firstChunks.map((chunk) => Number(chunk[2]))).toEqual(
+    firstChunks.map((_, sequence) => sequence),
+  );
+  expect(new Set(firstChunks.map((chunk) => chunk[1])).size).toBe(1);
+  expect(new Set(firstChunks.map((chunk) => chunk[4]))).toEqual(
+    new Set([selectedMediaType]),
+  );
+  expect(firstChunks.every((chunk) => Number(chunk[3]) > 0)).toBe(true);
+  expect(firstRecordingEvents.some((event) => event.startsWith("Alternate chunk"))).toBe(
+    false,
+  );
+  const completion = firstRecordingEvents.at(-1)?.match(
+    /^Completed \| (Recorder \d+ Recording \d+) \| bytes (\d+)$/,
+  );
+  expect(completion).not.toBeNull();
+  expect(completion?.[1]).toBe(firstChunks[0][1]);
+  expect(Number(completion?.[2])).toBe(
+    firstChunks.reduce((total, chunk) => total + Number(chunk[3]), 0),
+  );
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        maxChunkConversions?: number;
+      };
+      return browser.maxChunkConversions;
+    }),
+  ).toBe(1);
 
   const waveform = demo.getByRole("img", { name: "Recorded waveform" });
   await expect(waveform).toBeVisible();
@@ -90,12 +166,242 @@ test("a recording can be paused, resumed, completed, and played", async ({
       }),
     )
     .toBe(44_100);
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Alternate chunk"),
+      ).length,
+    )
+    .toBeGreaterThan(0);
+  const beforeDiscard = await lifecycle.locator("li").allTextContents();
+  const firstAlternate = beforeDiscard
+    .find((event) => event.startsWith("Alternate chunk"))
+    ?.match(
+      /^Alternate chunk \| (Recorder \d+ Recording \d+) \| sequence (\d+) \|/,
+    );
+  expect(firstAlternate?.[1]).not.toBe(firstChunks[0][1]);
+  expect(firstAlternate?.[2]).toBe("0");
   await demo.getByRole("button", { name: "Cancel recording" }).click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).some((event) =>
+        event.startsWith("Discarded"),
+      ),
+    )
+    .toBe(true);
+  const transferredAtDiscard = (
+    await lifecycle.locator("li").allTextContents()
+  ).filter((event) => event.startsWith("Alternate chunk")).length;
+  await page.waitForTimeout(500);
+  const afterDiscard = await lifecycle.locator("li").allTextContents();
+  expect(
+    afterDiscard.filter((event) => event.startsWith("Alternate chunk")).length,
+  ).toBe(transferredAtDiscard);
 
   await demo.getByRole("button", { name: "Play", exact: true }).click();
   await expect(
     demo.getByRole("button", { name: "Pause", exact: true }),
   ).toBeVisible();
+});
+
+test("source end drains final chunks before completion", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      recorderTrack?: MediaStreamTrack;
+      finalBlobSize?: number;
+      finalConvertedBlobSize?: number;
+      captureNextDataEvent?: boolean;
+      captureNextConversion?: boolean;
+      finalConversionStarted?: boolean;
+      finalConversionActive?: boolean;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const stream = await getUserMedia(constraints);
+        browser.recorderTrack = stream.getAudioTracks()[0];
+        return stream;
+      },
+    });
+    const onDataAvailable = Object.getOwnPropertyDescriptor(
+      MediaRecorder.prototype,
+      "ondataavailable",
+    );
+    if (onDataAvailable?.get && onDataAvailable.set) {
+      Object.defineProperty(MediaRecorder.prototype, "ondataavailable", {
+        configurable: true,
+        get: onDataAvailable.get,
+        set(handler: ((event: BlobEvent) => void) | null) {
+          const wrapped = handler
+            ? (event: BlobEvent) => {
+                if (browser.captureNextDataEvent) {
+                  browser.captureNextDataEvent = false;
+                  browser.captureNextConversion = true;
+                  browser.finalBlobSize = event.data.size;
+                }
+                handler.call(this, event);
+              }
+            : null;
+          onDataAvailable.set?.call(this, wrapped);
+        },
+      });
+    }
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = async function () {
+      if (browser.captureNextConversion) {
+        browser.captureNextConversion = false;
+        browser.finalConvertedBlobSize = this.size;
+        browser.finalConversionStarted = true;
+        browser.finalConversionActive = true;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        try {
+          return await arrayBuffer.call(this);
+        } finally {
+          browser.finalConversionActive = false;
+        }
+      }
+      return arrayBuffer.call(this);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+
+  await demo.getByRole("button", { name: "Start recording" }).click();
+  await expect
+    .poll(async () => lifecycle.locator("li").count())
+    .toBeGreaterThan(0);
+  const chunksBeforeSourceEnd = await lifecycle.locator("li").count();
+  await page.waitForTimeout(50);
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      recorderTrack?: MediaStreamTrack;
+      captureNextDataEvent?: boolean;
+    };
+    browser.captureNextDataEvent = true;
+    browser.recorderTrack?.dispatchEvent(new Event("ended"));
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          finalConversionStarted?: boolean;
+        };
+        return browser.finalConversionStarted ?? false;
+      }),
+    )
+    .toBe(true);
+  const finalBlobSize = await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      finalBlobSize?: number;
+      finalConvertedBlobSize?: number;
+      finalConversionActive?: boolean;
+    };
+    return {
+      size: browser.finalBlobSize ?? 0,
+      convertedSize: browser.finalConvertedBlobSize ?? 0,
+      conversionActive: browser.finalConversionActive ?? false,
+    };
+  });
+  expect(finalBlobSize.size).toBeGreaterThan(0);
+  expect(finalBlobSize.convertedSize).toBe(finalBlobSize.size);
+  expect(finalBlobSize.conversionActive).toBe(true);
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toHaveCount(0);
+
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toBeVisible();
+  const events = await lifecycle.locator("li").allTextContents();
+  expect(events.length - 1).toBeGreaterThan(chunksBeforeSourceEnd);
+  expect(events.at(-1)).toMatch(
+    /^Completed \| Recorder \d+ Recording \d+/,
+  );
+  expect(events.slice(0, -1).every((event) => event.includes("chunk"))).toBe(true);
+  const finalChunkBytes = events.at(-2)?.match(/\| bytes (\d+) \|/)?.[1];
+  expect(Number(finalChunkBytes)).toBe(finalBlobSize.size);
+  await page.waitForTimeout(300);
+  await expect(lifecycle.locator("li")).toHaveCount(events.length);
+});
+
+test("unmount suppresses an in-flight chunk conversion", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      chunkArrayBufferCalls?: number;
+    };
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = async function () {
+      browser.chunkArrayBufferCalls = (browser.chunkArrayBufferCalls ?? 0) + 1;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return arrayBuffer.call(this);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+
+  await demo.getByRole("button", { name: "Start recording" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          chunkArrayBufferCalls?: number;
+        };
+        return browser.chunkArrayBufferCalls ?? 0;
+      }),
+    )
+    .toBeGreaterThan(0);
+  await expect(lifecycle.locator("li")).toHaveCount(0);
+
+  await demo.getByRole("button", { name: "Unmount recorder" }).click();
+  await expect(demo.getByText("Recorder unmounted", { exact: true })).toBeVisible();
+  await page.waitForTimeout(700);
+
+  await expect(lifecycle.locator("li")).toHaveCount(0);
+});
+
+test("cancelling source acquisition publishes an identified discard", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return getUserMedia(constraints);
+      },
+    });
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+
+  await demo.getByRole("button", { name: "Start recording" }).click();
+  await demo
+    .getByRole("button", { name: "Cancel microphone request" })
+    .click();
+
+  await expect(lifecycle.locator("li")).toHaveText(
+    /^Discarded \| Recorder \d+ Recording \d+$/,
+  );
+  await page.waitForTimeout(700);
+  await expect(lifecycle.locator("li")).toHaveCount(1);
 });
 
 test("a cancelled recording is discarded and another can be completed", async ({

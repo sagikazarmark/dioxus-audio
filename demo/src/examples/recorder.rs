@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-use dioxus_audio::RecordedAudio;
 use dioxus_audio::components::{
     AudioInputSelector, AudioPlayer, LevelMeter, LiveWaveform, MicrophoneStatusIndicator,
     RecorderAnnouncementLabels, RecorderCancelButton, RecorderClearButton, RecorderControls,
@@ -9,19 +8,73 @@ use dioxus_audio::components::{
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
 use dioxus_audio::playback::PlaybackSource;
 use dioxus_audio::recorder::{
-    RecorderOptions, RecorderStatus, RecordingConstraint, RecordingConstraints,
-    is_recorder_mime_type_supported, use_audio_recorder,
+    RecorderOptions, RecorderStatus, RecordingChunkDelivery, RecordingConstraint,
+    RecordingConstraints, RecordingOutcome, is_recorder_mime_type_supported, use_audio_recorder,
 };
+use dioxus_audio::{RecordedAudio, RecordingChunk, RecordingId};
 
 use crate::components::StatusChip;
 
 /// Record from a selected input, inspect it, then play it back.
 #[component]
 pub fn RecorderExample() -> Element {
+    let mut mounted = use_signal(|| true);
+    let mut events = use_signal(Vec::<String>::new);
+    let mut recorder_number = use_signal(|| 1_u64);
+
+    rsx! {
+        div { class: "grid gap-5",
+            div { class: "flex flex-wrap items-center gap-2",
+                button {
+                    class: "btn btn-sm btn-outline",
+                    r#type: "button",
+                    onclick: move |_| {
+                        if mounted() {
+                            mounted.set(false);
+                        } else {
+                            recorder_number += 1;
+                            mounted.set(true);
+                        }
+                    },
+                    if mounted() { "Unmount recorder" } else { "Remount recorder" }
+                }
+                button {
+                    class: "btn btn-sm btn-ghost",
+                    r#type: "button",
+                    onclick: move |_| events.write().clear(),
+                    "Clear Recording lifecycle events"
+                }
+            }
+            if mounted() {
+                RecorderPanel { events, recorder_number: recorder_number() }
+            } else {
+                p { role: "status", "Recorder unmounted" }
+            }
+            div {
+                class: "rounded-2xl border border-base-300 bg-base-100 p-4",
+                role: "log",
+                aria_label: "Recording lifecycle events",
+                p { class: "text-xs font-semibold uppercase tracking-wider text-base-content/45",
+                    "Recording lifecycle events"
+                }
+                ul { class: "mt-2 grid gap-1 font-mono text-xs",
+                    for event in events() {
+                        li { "{event}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Element {
     let devices = use_audio_input_devices();
     let mut next_sample_rate = use_signal(|| 48_000_u32);
     let mut require_impossible_rate = use_signal(|| false);
+    let mut use_alternate_chunk_callback = use_signal(|| false);
     let mut mime_supported = use_signal(|| None::<bool>);
+    let mut recording_ids = use_signal(Vec::<RecordingId>::new);
     let sample_rate = if require_impossible_rate() {
         RecordingConstraint::Exact(1)
     } else {
@@ -38,6 +91,23 @@ pub fn RecorderExample() -> Element {
         )),
     };
     options.mime_types.clear();
+    let chunk_callback_name = if use_alternate_chunk_callback() {
+        "Alternate"
+    } else {
+        "Primary"
+    };
+    options.chunk_delivery = Some(RecordingChunkDelivery::new(
+        std::time::Duration::from_millis(100),
+        move |chunk| {
+            record_chunk_event(
+                chunk_callback_name,
+                chunk,
+                recorder_number,
+                &mut events,
+                &mut recording_ids,
+            );
+        },
+    ));
     let recorder = use_audio_recorder(options, devices.selected().into());
     let custom_recorder = use_audio_recorder(RecorderOptions::default(), devices.selected().into());
     let mut completed = use_signal(|| None::<RecordedAudio>);
@@ -47,8 +117,39 @@ pub fn RecorderExample() -> Element {
         if recorder.completed().read().is_some()
             && let Some(recording) = recorder.take_completed()
         {
+            let recording_label =
+                recording_label(recorder_number, &mut recording_ids, recording.recording_id);
+            events.write().push(format!(
+                "Completed | {recording_label} | bytes {}",
+                recording.audio.bytes.len(),
+            ));
             source.set(Some(recording.audio.clone().into()));
             completed.set(Some(recording));
+        }
+    });
+    use_effect(move || {
+        if let Some(outcome) = recorder.outcome()() {
+            match outcome {
+                RecordingOutcome::Discarded(recording_id) => {
+                    let recording_label =
+                        recording_label(recorder_number, &mut recording_ids, recording_id);
+                    events
+                        .write()
+                        .push(format!("Discarded | {recording_label}"));
+                }
+                RecordingOutcome::Failed {
+                    recording_id,
+                    error,
+                } => {
+                    let recording_label =
+                        recording_label(recorder_number, &mut recording_ids, recording_id);
+                    events
+                        .write()
+                        .push(format!("Failed | {recording_label} | {error}"));
+                }
+                RecordingOutcome::Completed(_) => {}
+                _ => {}
+            }
         }
     });
     use_effect(move || {
@@ -108,6 +209,12 @@ pub fn RecorderExample() -> Element {
                         r#type: "button",
                         onclick: move |_| next_sample_rate.set(44_100),
                         "Use 44100 Hz for future recordings"
+                    }
+                    button {
+                        class: "btn btn-sm btn-outline",
+                        r#type: "button",
+                        onclick: move |_| use_alternate_chunk_callback.set(true),
+                        "Use alternate chunk callback for future recordings"
                     }
                     button {
                         class: "btn btn-sm btn-outline",
@@ -268,6 +375,39 @@ pub fn RecorderExample() -> Element {
             }
         }
     }
+}
+
+fn record_chunk_event(
+    callback_name: &str,
+    chunk: RecordingChunk,
+    recorder_number: u64,
+    events: &mut Signal<Vec<String>>,
+    recording_ids: &mut Signal<Vec<RecordingId>>,
+) {
+    let recording_label = recording_label(recorder_number, recording_ids, chunk.recording_id);
+    events.write().push(format!(
+        "{callback_name} chunk | {recording_label} | sequence {} | bytes {} | {}",
+        chunk.sequence,
+        chunk.bytes.len(),
+        chunk.media_type
+    ));
+}
+
+fn recording_label(
+    recorder_number: u64,
+    recording_ids: &mut Signal<Vec<RecordingId>>,
+    recording_id: RecordingId,
+) -> String {
+    let existing = recording_ids
+        .peek()
+        .iter()
+        .position(|candidate| *candidate == recording_id);
+    let index = existing.unwrap_or_else(|| {
+        let mut recording_ids = recording_ids.write();
+        recording_ids.push(recording_id);
+        recording_ids.len() - 1
+    });
+    format!("Recorder {recorder_number} Recording {}", index + 1)
 }
 
 fn format_duration(seconds: f64) -> String {

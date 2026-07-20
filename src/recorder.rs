@@ -1,6 +1,8 @@
 //! Microphone recording state and hooks.
 
+use std::cell::RefCell;
 use std::fmt;
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
@@ -8,7 +10,7 @@ use dioxus::prelude::*;
 use crate::AudioError;
 use crate::analysis::AudioAnalyser;
 use crate::devices::MicrophonePermission;
-use crate::{AudioInputId, RecordedAudio};
+use crate::{AudioInputId, RecordedAudio, RecordingChunk, RecordingId};
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
@@ -30,8 +32,26 @@ pub enum CompletionDisposition {
     Discard,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RecordingSessionId(u64);
+/// The terminal outcome of an accepted Recording.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordingOutcome {
+    Completed(RecordingId),
+    Discarded(RecordingId),
+    Failed {
+        recording_id: RecordingId,
+        error: AudioError,
+    },
+}
+
+impl RecordingOutcome {
+    pub fn recording_id(&self) -> RecordingId {
+        match self {
+            Self::Completed(recording_id) | Self::Discarded(recording_id) => *recording_id,
+            Self::Failed { recording_id, .. } => *recording_id,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecorderCommandError {
@@ -56,7 +76,8 @@ impl std::error::Error for RecorderCommandError {}
 pub struct RecorderLifecycle {
     status: RecorderStatus,
     generation: u64,
-    active_session: Option<RecordingSessionId>,
+    active_recording: Option<RecordingId>,
+    next_chunk_sequence: u64,
     completion: CompletionDisposition,
     finalizing: bool,
     has_unconsumed_recording: bool,
@@ -67,7 +88,8 @@ impl Default for RecorderLifecycle {
         Self {
             status: RecorderStatus::Idle,
             generation: 0,
-            active_session: None,
+            active_recording: None,
+            next_chunk_sequence: 0,
             completion: CompletionDisposition::Save,
             finalizing: false,
             has_unconsumed_recording: false,
@@ -80,7 +102,7 @@ impl RecorderLifecycle {
         &self.status
     }
 
-    pub fn start(&mut self) -> Result<RecordingSessionId, RecorderCommandError> {
+    pub fn start(&mut self) -> Result<RecordingId, RecorderCommandError> {
         if self.has_unconsumed_recording {
             return Err(command_error(
                 "clear the completed recording before starting another",
@@ -94,16 +116,17 @@ impl RecorderLifecycle {
         }
 
         self.generation = self.generation.wrapping_add(1);
-        let session = RecordingSessionId(self.generation);
-        self.active_session = Some(session);
+        let recording_id = RecordingId::from_generation(self.generation);
+        self.active_recording = Some(recording_id);
+        self.next_chunk_sequence = 0;
         self.completion = CompletionDisposition::Save;
         self.finalizing = false;
         self.status = RecorderStatus::RequestingPermission;
-        Ok(session)
+        Ok(recording_id)
     }
 
-    pub fn started(&mut self, session: RecordingSessionId) -> bool {
-        if self.active_session == Some(session)
+    pub fn started(&mut self, recording_id: RecordingId) -> bool {
+        if self.active_recording == Some(recording_id)
             && matches!(self.status, RecorderStatus::RequestingPermission)
         {
             self.status = RecorderStatus::Recording;
@@ -144,10 +167,28 @@ impl RecorderLifecycle {
         Ok(())
     }
 
+    /// Reserve the next contiguous sequence for a non-empty Recording Chunk.
+    pub fn next_chunk_sequence(&mut self, recording_id: RecordingId) -> Option<u64> {
+        let accepts_chunk = self.active_recording == Some(recording_id)
+            && !self.finalizing
+            && (matches!(
+                self.status,
+                RecorderStatus::Recording | RecorderStatus::Paused
+            ) || (matches!(self.status, RecorderStatus::Stopping)
+                && self.completion == CompletionDisposition::Save));
+        if !accepts_chunk {
+            return None;
+        }
+
+        let sequence = self.next_chunk_sequence;
+        self.next_chunk_sequence = self.next_chunk_sequence.checked_add(1)?;
+        Some(sequence)
+    }
+
     pub fn cancel(&mut self) -> Result<(), RecorderCommandError> {
         match self.status {
             RecorderStatus::RequestingPermission => {
-                self.active_session = None;
+                self.active_recording = None;
                 self.status = RecorderStatus::Idle;
             }
             RecorderStatus::Recording | RecorderStatus::Paused => {
@@ -164,8 +205,8 @@ impl RecorderLifecycle {
         Ok(())
     }
 
-    pub fn begin_finalize(&mut self, session: RecordingSessionId) -> Option<CompletionDisposition> {
-        if self.active_session != Some(session) || self.finalizing {
+    pub fn begin_finalize(&mut self, recording_id: RecordingId) -> Option<CompletionDisposition> {
+        if self.active_recording != Some(recording_id) || self.finalizing {
             return None;
         }
 
@@ -182,12 +223,12 @@ impl RecorderLifecycle {
         Some(self.completion)
     }
 
-    pub fn complete_finalize(&mut self, session: RecordingSessionId) -> bool {
-        if self.active_session != Some(session) || !self.finalizing {
+    pub fn complete_finalize(&mut self, recording_id: RecordingId) -> bool {
+        if self.active_recording != Some(recording_id) || !self.finalizing {
             return false;
         }
 
-        self.active_session = None;
+        self.active_recording = None;
         self.finalizing = false;
         self.has_unconsumed_recording = self.completion == CompletionDisposition::Save;
         self.status = RecorderStatus::Idle;
@@ -198,19 +239,19 @@ impl RecorderLifecycle {
         self.has_unconsumed_recording = false;
     }
 
-    pub fn failed(&mut self, session: RecordingSessionId, error: AudioError) -> bool {
-        if self.active_session != Some(session) {
+    pub fn failed(&mut self, recording_id: RecordingId, error: AudioError) -> bool {
+        if self.active_recording != Some(recording_id) {
             return false;
         }
 
-        self.active_session = None;
+        self.active_recording = None;
         self.finalizing = false;
         self.status = RecorderStatus::Failed(error);
         true
     }
 
     pub fn configuration_failed(&mut self, error: AudioError) -> bool {
-        if self.active_session.is_some()
+        if self.active_recording.is_some()
             || !matches!(
                 self.status,
                 RecorderStatus::Idle | RecorderStatus::Failed(_)
@@ -220,6 +261,12 @@ impl RecorderLifecycle {
         }
         self.status = RecorderStatus::Failed(error);
         true
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn abandon(&mut self) {
+        self.active_recording = None;
+        self.finalizing = false;
     }
 }
 
@@ -270,6 +317,52 @@ pub struct RecordingSourceSettings {
     pub latency: Option<Duration>,
 }
 
+type RecordingChunkHandler = Rc<RefCell<Box<dyn FnMut(RecordingChunk)>>>;
+
+/// Opt-in cadence and callback for ordered Recording Chunk delivery.
+#[derive(Clone)]
+pub struct RecordingChunkDelivery {
+    /// Approximate interval at which the browser should create chunk boundaries.
+    pub cadence: Duration,
+    on_chunk: RecordingChunkHandler,
+}
+
+impl fmt::Debug for RecordingChunkDelivery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecordingChunkDelivery")
+            .field("cadence", &self.cadence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RecordingChunkDelivery {
+    fn eq(&self, other: &Self) -> bool {
+        self.cadence == other.cadence && Rc::ptr_eq(&self.on_chunk, &other.on_chunk)
+    }
+}
+
+impl RecordingChunkDelivery {
+    /// Configure ordered push delivery at an approximate cadence.
+    pub fn new(cadence: Duration, on_chunk: impl FnMut(RecordingChunk) + 'static) -> Self {
+        Self {
+            cadence,
+            on_chunk: Rc::new(RefCell::new(Box::new(on_chunk))),
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn call(&self, chunk: RecordingChunk) {
+        (self.on_chunk.borrow_mut())(chunk);
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn time_slice_millis(&self) -> i32 {
+        i32::try_from(self.cadence.as_millis())
+            .expect("validated Recording Chunk cadence fits in an i32")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct RecorderOptions {
@@ -279,6 +372,7 @@ pub struct RecorderOptions {
     pub constraints: RecordingConstraints,
     pub mime_types: Vec<String>,
     pub audio_bits_per_second: Option<u32>,
+    pub chunk_delivery: Option<RecordingChunkDelivery>,
 }
 
 impl Default for RecorderOptions {
@@ -294,6 +388,7 @@ impl Default for RecorderOptions {
                 "audio/mp4".to_string(),
             ],
             audio_bits_per_second: None,
+            chunk_delivery: None,
         }
     }
 }
@@ -316,6 +411,15 @@ impl RecorderOptions {
             return Err(AudioError::new(
                 crate::AudioErrorKind::InvalidConfiguration,
                 "peak_interval must be greater than zero",
+            ));
+        }
+        if let Some(delivery) = &self.chunk_delivery
+            && (delivery.cadence.as_millis() == 0
+                || delivery.cadence.as_millis() > i32::MAX as u128)
+        {
+            return Err(AudioError::new(
+                crate::AudioErrorKind::InvalidConfiguration,
+                "Recording Chunk cadence must be between 1 millisecond and 2147483647 milliseconds",
             ));
         }
         Ok(())
@@ -341,6 +445,7 @@ pub struct AudioRecorder {
     constraint_capabilities: ReadSignal<Option<RecorderConstraintCapabilities>>,
     settings: ReadSignal<Option<RecordingSourceSettings>>,
     media_type: ReadSignal<Option<String>>,
+    outcome: ReadSignal<Option<RecordingOutcome>>,
     start: Callback<(), Result<(), RecorderCommandError>>,
     pause: Callback<(), Result<(), RecorderCommandError>>,
     resume: Callback<(), Result<(), RecorderCommandError>>,
@@ -391,6 +496,11 @@ impl AudioRecorder {
     /// Encoder media type selected for the current or most recent Recording.
     pub fn media_type(self) -> ReadSignal<Option<String>> {
         self.media_type
+    }
+
+    /// Terminal outcome of the most recently accepted Recording, if any.
+    pub fn outcome(self) -> ReadSignal<Option<RecordingOutcome>> {
+        self.outcome
     }
 
     pub fn start(self) -> Result<(), RecorderCommandError> {
@@ -468,6 +578,7 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
     let constraint_capabilities = use_signal(|| None::<RecorderConstraintCapabilities>);
     let settings = use_signal(|| None::<RecordingSourceSettings>);
     let media_type = use_signal(|| None::<String>);
+    let outcome = use_signal(|| None::<RecordingOutcome>);
     let mut microphone = use_signal(|| MicrophoneStatus {
         permission: MicrophonePermission::Unknown,
         recorder: RecorderStatus::Idle,
@@ -504,6 +615,7 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
         constraint_capabilities: constraint_capabilities.into(),
         settings: settings.into(),
         media_type: media_type.into(),
+        outcome: outcome.into(),
         start: unsupported,
         pause: unsupported,
         resume: unsupported,

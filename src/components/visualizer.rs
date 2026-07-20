@@ -1,10 +1,12 @@
 use dioxus::prelude::*;
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use std::cell::Cell;
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use std::rc::Rc;
 
-use crate::analysis::{AnalysisDomain, AudioAnalyser};
+use crate::analysis::{
+    AnalysisDomain, AudioAnalyser, use_live_analysis_domain, use_live_analysis_level,
+};
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use crate::analysis::{
+    LiveAnalysisOptions, run_live_analysis_schedule, use_live_analysis_scheduler,
+};
 
 #[component]
 pub fn LiveWaveform(
@@ -47,7 +49,18 @@ fn LiveVisualizer(
     label: String,
 ) -> Element {
     let bars = bars.clamp(1, 128);
-    let values = use_live_values(analyser, domain, processing, bars);
+    let samples = use_live_analysis_domain(analyser, domain);
+    let has_samples = samples.read().is_some();
+    let processing_values = use_processing_values(processing && !has_samples, bars);
+    let values = samples()
+        .map(|samples| reduce_samples(&samples, bars, domain))
+        .unwrap_or_else(|| {
+            if processing {
+                processing_values()
+            } else {
+                vec![0.04; bars]
+            }
+        });
 
     rsx! {
         div {
@@ -58,7 +71,7 @@ fn LiveVisualizer(
                 AnalysisDomain::Waveform => "waveform",
                 AnalysisDomain::Spectrum => "spectrum",
             },
-            for (index, value) in values().iter().enumerate() {
+            for (index, value) in values.iter().enumerate() {
                 {
                     let bar_height = (value * 100.0).clamp(4.0, 100.0);
                     rsx! {
@@ -79,8 +92,8 @@ pub fn LevelMeter(
     analyser: ReadSignal<Option<AudioAnalyser>>,
     #[props(default)] label: Option<String>,
 ) -> Element {
-    let level = use_live_level(analyser);
-    let percentage = (level() * 100.0).clamp(0.0, 100.0);
+    let level = use_live_analysis_level(analyser);
+    let percentage = (level().unwrap_or(0.0) * 100.0).clamp(0.0, 100.0);
 
     rsx! {
         div {
@@ -98,113 +111,52 @@ pub fn LevelMeter(
     }
 }
 
-fn use_live_values(
-    analyser: ReadSignal<Option<AudioAnalyser>>,
-    domain: AnalysisDomain,
-    processing: bool,
-    bars: usize,
-) -> ReadSignal<Vec<f32>> {
-    let parameters = use_memo(use_reactive!(|(analyser, processing, bars)| (
-        analyser, processing, bars
-    )));
+fn use_processing_values(processing: bool, bars: usize) -> ReadSignal<Vec<f32>> {
+    let parameters = use_memo(use_reactive!(|(processing, bars)| (processing, bars)));
     #[allow(unused_mut)]
     let mut values = use_signal(|| vec![0.04; bars]);
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    let generation = use_hook(|| Rc::new(Cell::new(0_u64)));
+    let scheduler = use_live_analysis_scheduler();
 
     use_effect(move || {
-        let (analyser, processing, bars) = parameters();
+        let (processing, bars) = parameters();
         values.set(vec![0.04; bars]);
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        let current_generation = {
-            let current = generation.get().wrapping_add(1);
-            generation.set(current);
-            current
-        };
-        let has_analyser = analyser().is_some();
-        if !has_analyser && !processing {
+        let current_generation = scheduler.next_generation();
+        if !processing {
             return;
         }
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
-            let generation = generation.clone();
-            spawn(async move {
-                let mut tick = 0.0_f32;
-                loop {
-                    if generation.get() != current_generation {
-                        break;
-                    }
-                    let next = if let Some(analyser) = analyser() {
-                        reduce_samples(&analyser.read(domain), bars, domain)
-                    } else if processing {
-                        tick += 0.18;
-                        (0..bars)
-                            .map(|index| {
-                                let phase = index as f32 / bars as f32 * std::f32::consts::TAU;
-                                (0.3 + (phase + tick).sin().abs() * 0.55).clamp(0.04, 1.0)
-                            })
-                            .collect()
-                    } else {
-                        vec![0.04; bars]
-                    };
+            let scheduler = scheduler.clone();
+            let mut tick = 0.0_f32;
+            spawn(run_live_analysis_schedule(
+                scheduler,
+                current_generation,
+                LiveAnalysisOptions::default().cadence(),
+                move || {
+                    tick += 0.18;
+                    let next = (0..bars)
+                        .map(|index| {
+                            let phase = index as f32 / bars as f32 * std::f32::consts::TAU;
+                            (0.3 + (phase + tick).sin().abs() * 0.55).clamp(0.04, 1.0)
+                        })
+                        .collect();
                     values.set(next);
-                    gloo_timers::future::TimeoutFuture::new(50).await;
-                }
-            });
+                    true
+                },
+            ));
         }
 
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
-            let _ = (analyser, domain, processing, bars);
+            let _ = (processing, bars);
         }
     });
 
     values.into()
 }
 
-fn use_live_level(analyser: ReadSignal<Option<AudioAnalyser>>) -> ReadSignal<f32> {
-    let analyser_input = use_memo(use_reactive!(|(analyser,)| analyser));
-    #[allow(unused_mut)]
-    let mut level = use_signal(|| 0.0_f32);
-    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    let generation = use_hook(|| Rc::new(Cell::new(0_u64)));
-
-    use_effect(move || {
-        let analyser = analyser_input();
-        level.set(0.0);
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        let current_generation = {
-            let current = generation.get().wrapping_add(1);
-            generation.set(current);
-            current
-        };
-        if analyser().is_none() {
-            return;
-        }
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        {
-            let generation = generation.clone();
-            spawn(async move {
-                loop {
-                    if generation.get() != current_generation {
-                        break;
-                    }
-                    level.set(analyser().map(|value| value.level()).unwrap_or(0.0));
-                    gloo_timers::future::TimeoutFuture::new(50).await;
-                }
-            });
-        }
-
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-        {
-            let _ = analyser;
-        }
-    });
-
-    level.into()
-}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn reduce_samples(samples: &[f32], bars: usize, domain: AnalysisDomain) -> Vec<f32> {
     if samples.is_empty() {
         return vec![0.04; bars];

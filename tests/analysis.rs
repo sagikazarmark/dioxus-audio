@@ -1,6 +1,53 @@
 use dioxus_audio::analysis::{
-    WaveformSelection, downsample_peaks, peak_amplitude, trim_interleaved_pcm,
+    AnalysisMetadata, LiveAnalysisOptions, WaveformSelection, downsample_peaks, peak_amplitude,
+    rms_level, trim_interleaved_pcm,
 };
+use std::time::Duration;
+
+#[test]
+fn analysis_metadata_maps_frequency_bins_and_decibels() {
+    let metadata = AnalysisMetadata::new(48_000.0, 1_024, -100.0, -30.0, 0.8);
+
+    assert_eq!(metadata.sample_rate(), 48_000.0);
+    assert_eq!(metadata.fft_size(), 1_024);
+    assert_eq!(metadata.frequency_bin_count(), 512);
+    assert_eq!(metadata.frequency_bin_width(), 46.875);
+    assert_eq!(metadata.frequency_for_bin(0), Some(0.0));
+    assert_eq!(metadata.frequency_for_bin(511), Some(23_953.125));
+    assert_eq!(metadata.frequency_for_bin(512), None);
+    assert_eq!(metadata.decibels_for_frequency_value(0.0), -100.0);
+    assert_eq!(metadata.decibels_for_frequency_value(0.5), -65.0);
+    assert_eq!(metadata.decibels_for_frequency_value(1.0), -30.0);
+    assert_eq!(metadata.smoothing(), 0.8);
+}
+
+#[test]
+fn live_analysis_cadence_is_clamped_to_documented_bounds() {
+    assert_eq!(
+        LiveAnalysisOptions::default().cadence(),
+        Duration::from_millis(50)
+    );
+    assert_eq!(
+        LiveAnalysisOptions::default()
+            .with_cadence(Duration::ZERO)
+            .cadence(),
+        Duration::from_millis(16)
+    );
+    assert_eq!(
+        LiveAnalysisOptions::default()
+            .with_cadence(Duration::from_secs(5))
+            .cadence(),
+        Duration::from_secs(1)
+    );
+}
+
+#[test]
+fn analysis_level_is_normalized_root_mean_square_amplitude() {
+    assert_eq!(rms_level(&[]), 0.0);
+    assert_eq!(rms_level(&[0.5, -0.5]), 0.5);
+    assert!((rms_level(&[1.0, 0.0]) - std::f32::consts::FRAC_1_SQRT_2).abs() < f32::EPSILON);
+    assert_eq!(rms_level(&[2.0, -2.0]), 1.0);
+}
 
 #[test]
 fn short_waveforms_do_not_gain_empty_buckets() {

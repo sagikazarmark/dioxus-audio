@@ -13,7 +13,8 @@
 - **Playback:** loading, playback lifecycle, stop/reset, whole-source repeat,
   seeking, skipping, and playback rate.
 - **Audio input devices:** enumeration, selection, permission requests, and device-change handling.
-- **Analysis:** peak reduction, waveform and spectrum data, levels, and PCM range trimming.
+- **Analysis:** bounded reactive snapshots, interpretable waveform and spectrum
+  data, RMS levels, peak reduction, and PCM range trimming.
 - **Dioxus components:** player and recorder controls, scrubber, input
   selector, microphone status, waveform views, spectrum, and level meter.
 - **Scoped styles:** authored CSS with a `dioxus-audio` namespace and stable
@@ -118,6 +119,48 @@ starts. `is_recorder_mime_type_supported()` can be used before starting to probe
 a candidate format, but a positive probe only means the browser recognizes the
 type. It does not guarantee source acquisition, Recorder construction, or a
 successful Recording.
+
+## Live Analysis
+
+Use `use_live_analysis` with an optional `AudioAnalyser` from any supported
+source. Recorder supplies one through `recorder.analyser()` while a Recording is
+active; future sources can provide the same source-neutral handle.
+
+```rust
+use dioxus_audio::analysis::{LiveAnalysisOptions, use_live_analysis};
+
+let analysis = use_live_analysis(
+    recorder.analyser(),
+    LiveAnalysisOptions::default(),
+);
+
+if let Some(snapshot) = analysis() {
+    let metadata = snapshot.metadata();
+    let first_bin_hz = metadata.frequency_for_bin(1);
+    let rms_level = snapshot.level();
+    let waveform = snapshot.time_domain();
+    let spectrum = snapshot.frequency_domain();
+}
+```
+
+The default cadence is 50ms. `with_cadence` clamps requested values to
+`16ms..=1s`, preventing unbounded polling and rendering rates. Each hook call
+has an independent schedule. Its snapshot becomes `None` when the Analyser is
+removed or replaced, stale work cannot publish into the replacement, polling
+stops on unmount, and analyser reads are suspended while the document is
+hidden.
+
+Time-domain values are byte-quantized amplitudes normalized to `-1.0..=1.0`.
+Frequency-domain values are byte-quantized magnitudes normalized to
+`0.0..=1.0`; `AnalysisMetadata` supplies the effective graph sample rate, FFT
+size, bin count and frequency mapping, decibel range, and smoothing constant
+needed to interpret them. `snapshot.level()` is normalized RMS amplitude over
+that snapshot's FFT-sized time-domain window. It is not peak amplitude,
+perceived loudness, sound pressure level, or Playback audibility.
+
+`LiveWaveform`, `SpectrumVisualizer`, and `LevelMeter` use the same bounded
+scheduling behavior while collecting only the values each presentation needs.
+Their changing Analysis values are not live-region announcements.
 
 ## Playback
 

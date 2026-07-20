@@ -1,13 +1,13 @@
 use dioxus::prelude::*;
-use dioxus_audio::analysis::WaveformSelection;
+use dioxus_audio::analysis::{LiveAnalysisOptions, WaveformSelection, use_live_analysis};
 use dioxus_audio::components::{
-    AudioInputSelector, AudioPlayer, AudioScrubber, MicrophoneStatusIndicator,
-    PlaybackAnnouncementLabels, PlaybackAudibilitySlider, PlaybackMuteButton,
-    PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton, PlaybackSeekSlider,
-    PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton, RecorderAnnouncementLabels,
-    RecorderCancelButton, RecorderClearButton, RecorderControls, RecorderPauseResumeButton,
-    RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton, SpectrumVisualizer, Waveform,
-    WaveformPreview, WaveformRangeSelector,
+    AudioInputSelector, AudioPlayer, AudioScrubber, LevelMeter, LiveWaveform,
+    MicrophoneStatusIndicator, PlaybackAnnouncementLabels, PlaybackAudibilitySlider,
+    PlaybackMuteButton, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton,
+    PlaybackSeekSlider, PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton,
+    RecorderAnnouncementLabels, RecorderCancelButton, RecorderClearButton, RecorderControls,
+    RecorderPauseResumeButton, RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton,
+    SpectrumVisualizer, Waveform, WaveformPreview, WaveformRangeSelector,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
 use dioxus_audio::playback::use_audio_player;
@@ -168,6 +168,31 @@ fn live_visualizers_are_named_for_assistive_technology() {
 
     assert!(html.contains("role=\"img\""));
     assert!(html.contains("aria-label=\"Microphone spectrum\""));
+}
+
+#[test]
+fn live_analysis_is_ssr_neutral_and_never_creates_a_live_region() {
+    fn app() -> Element {
+        let analyser = use_signal(|| None);
+        let snapshot = use_live_analysis(analyser.into(), LiveAnalysisOptions::default());
+
+        rsx! {
+            p { "Analysis available: {snapshot().is_some()}" }
+            LiveWaveform { analyser }
+            SpectrumVisualizer { analyser }
+            LevelMeter { analyser }
+        }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+
+    assert!(html.contains("Analysis available: false"), "{html}");
+    assert_eq!(html.matches("role=\"img\"").count(), 2, "{html}");
+    assert_eq!(html.matches("role=\"meter\"").count(), 1, "{html}");
+    assert!(!html.contains("aria-live"), "{html}");
+    assert!(!html.contains("role=\"status\""), "{html}");
 }
 
 #[test]

@@ -712,7 +712,7 @@ async fn start_session(
     }
     let media_type = recorder.mime_type();
     let (stream, context) = pending.into_parts();
-    let analyser = AudioAnalyser::new(analyser_node);
+    let analyser = AudioAnalyser::new(analyser_node, context.sample_rate());
     let session = WebSession {
         recorder,
         stream,

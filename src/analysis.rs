@@ -1,5 +1,161 @@
 //! Platform-independent audio analysis helpers.
 
+use dioxus::prelude::*;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use std::cell::Cell;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Metadata needed to interpret one live Analysis snapshot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnalysisMetadata {
+    sample_rate: f32,
+    fft_size: u32,
+    min_decibels: f32,
+    max_decibels: f32,
+    smoothing: f64,
+}
+
+impl AnalysisMetadata {
+    pub fn new(
+        sample_rate: f32,
+        fft_size: u32,
+        min_decibels: f32,
+        max_decibels: f32,
+        smoothing: f64,
+    ) -> Self {
+        Self {
+            sample_rate,
+            fft_size,
+            min_decibels,
+            max_decibels,
+            smoothing,
+        }
+    }
+
+    /// Effective sample rate of the audio graph, in hertz.
+    pub fn sample_rate(self) -> f32 {
+        self.sample_rate
+    }
+
+    /// Number of time-domain samples in each snapshot.
+    pub fn fft_size(self) -> u32 {
+        self.fft_size
+    }
+
+    /// Number of frequency values in each snapshot.
+    pub fn frequency_bin_count(self) -> u32 {
+        self.fft_size / 2
+    }
+
+    /// Width of each frequency bin, in hertz.
+    pub fn frequency_bin_width(self) -> f32 {
+        if self.fft_size == 0 {
+            0.0
+        } else {
+            self.sample_rate / self.fft_size as f32
+        }
+    }
+
+    /// Center frequency represented by `bin`, or `None` when it is out of range.
+    pub fn frequency_for_bin(self, bin: u32) -> Option<f32> {
+        (bin < self.frequency_bin_count()).then(|| bin as f32 * self.frequency_bin_width())
+    }
+
+    pub fn min_decibels(self) -> f32 {
+        self.min_decibels
+    }
+
+    pub fn max_decibels(self) -> f32 {
+        self.max_decibels
+    }
+
+    /// Convert a normalized byte-frequency value to its configured decibel value.
+    pub fn decibels_for_frequency_value(self, value: f32) -> f32 {
+        self.min_decibels + value.clamp(0.0, 1.0) * (self.max_decibels - self.min_decibels)
+    }
+
+    /// Frequency-domain smoothing time constant in the inclusive range `0.0..=1.0`.
+    pub fn smoothing(self) -> f64 {
+        self.smoothing
+    }
+}
+
+/// Bounded scheduling options for reactive live Analysis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveAnalysisOptions {
+    cadence: Duration,
+}
+
+impl LiveAnalysisOptions {
+    pub const MIN_CADENCE: Duration = Duration::from_millis(16);
+    pub const MAX_CADENCE: Duration = Duration::from_secs(1);
+
+    /// Set the polling cadence, clamped to `16ms..=1s`.
+    pub fn with_cadence(mut self, cadence: Duration) -> Self {
+        self.cadence = cadence.clamp(Self::MIN_CADENCE, Self::MAX_CADENCE);
+        self
+    }
+
+    pub fn cadence(self) -> Duration {
+        self.cadence
+    }
+}
+
+impl Default for LiveAnalysisOptions {
+    fn default() -> Self {
+        Self {
+            cadence: Duration::from_millis(50),
+        }
+    }
+}
+
+/// Return normalized root mean square amplitude for one time-domain window.
+pub fn rms_level(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+
+    let mean_square =
+        samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
+    mean_square.sqrt().clamp(0.0, 1.0)
+}
+
+/// Immutable values collected together from one Analyser.
+///
+/// Time-domain values are byte-quantized amplitudes normalized to
+/// `-1.0..=1.0`. Frequency-domain values are byte-quantized magnitudes
+/// normalized to `0.0..=1.0`. `level` is the normalized RMS amplitude of the
+/// same time-domain window, not a peak, perceived loudness, or sound pressure
+/// level measurement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveAnalysisSnapshot {
+    time_domain: Arc<[f32]>,
+    frequency_domain: Arc<[f32]>,
+    level: f32,
+    metadata: AnalysisMetadata,
+}
+
+impl LiveAnalysisSnapshot {
+    pub fn time_domain(&self) -> &[f32] {
+        &self.time_domain
+    }
+
+    pub fn frequency_domain(&self) -> &[f32] {
+        &self.frequency_domain
+    }
+
+    pub fn level(&self) -> f32 {
+        self.level
+    }
+
+    pub fn metadata(&self) -> AnalysisMetadata {
+        self.metadata
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnalysisDomain {
     Waveform,
@@ -11,12 +167,13 @@ pub enum AnalysisDomain {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioAnalyser {
     node: web_sys::AnalyserNode,
+    sample_rate: f32,
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 impl AudioAnalyser {
-    pub(crate) fn new(node: web_sys::AnalyserNode) -> Self {
-        Self { node }
+    pub(crate) fn new(node: web_sys::AnalyserNode, sample_rate: f32) -> Self {
+        Self { node, sample_rate }
     }
 
     pub fn read(&self, domain: AnalysisDomain) -> Vec<f32> {
@@ -43,13 +200,28 @@ impl AudioAnalyser {
     }
 
     pub fn level(&self) -> f32 {
-        let waveform = self.read(AnalysisDomain::Waveform);
-        if waveform.is_empty() {
-            return 0.0;
+        rms_level(&self.read(AnalysisDomain::Waveform))
+    }
+
+    fn snapshot(&self) -> LiveAnalysisSnapshot {
+        let time_domain: Arc<[f32]> = self.read(AnalysisDomain::Waveform).into();
+        let frequency_domain = self.read(AnalysisDomain::Spectrum).into();
+        LiveAnalysisSnapshot {
+            level: rms_level(&time_domain),
+            time_domain,
+            frequency_domain,
+            metadata: self.metadata(),
         }
-        let mean_square =
-            waveform.iter().map(|sample| sample * sample).sum::<f32>() / waveform.len() as f32;
-        mean_square.sqrt().clamp(0.0, 1.0)
+    }
+
+    fn metadata(&self) -> AnalysisMetadata {
+        AnalysisMetadata::new(
+            self.sample_rate,
+            self.node.fft_size(),
+            self.node.min_decibels() as f32,
+            self.node.max_decibels() as f32,
+            self.node.smoothing_time_constant(),
+        )
     }
 
     pub(crate) fn node(&self) -> &web_sys::AnalyserNode {
@@ -72,6 +244,193 @@ impl AudioAnalyser {
     pub fn level(&self) -> f32 {
         0.0
     }
+
+    fn snapshot(&self) -> LiveAnalysisSnapshot {
+        LiveAnalysisSnapshot {
+            time_domain: Arc::from([]),
+            frequency_domain: Arc::from([]),
+            level: 0.0,
+            metadata: AnalysisMetadata::new(0.0, 0, 0.0, 0.0, 0.0),
+        }
+    }
+}
+
+/// Reactively collect complete, interpretable snapshots from an optional Analyser.
+///
+/// The output is `None` until an Analyser is available and is cleared when the
+/// Analyser is lost or replaced. Polling is suspended while the document is
+/// hidden and ends when this hook is unmounted. Every hook invocation owns an
+/// independent schedule.
+pub fn use_live_analysis(
+    analyser: ReadSignal<Option<AudioAnalyser>>,
+    options: LiveAnalysisOptions,
+) -> ReadSignal<Option<LiveAnalysisSnapshot>> {
+    use_scheduled_analysis(analyser, options, AudioAnalyser::snapshot)
+}
+
+pub(crate) fn use_live_analysis_domain(
+    analyser: ReadSignal<Option<AudioAnalyser>>,
+    domain: AnalysisDomain,
+) -> ReadSignal<Option<Arc<[f32]>>> {
+    match domain {
+        AnalysisDomain::Waveform => {
+            use_scheduled_analysis(analyser, LiveAnalysisOptions::default(), read_waveform)
+        }
+        AnalysisDomain::Spectrum => {
+            use_scheduled_analysis(analyser, LiveAnalysisOptions::default(), read_spectrum)
+        }
+    }
+}
+
+pub(crate) fn use_live_analysis_level(
+    analyser: ReadSignal<Option<AudioAnalyser>>,
+) -> ReadSignal<Option<f32>> {
+    use_scheduled_analysis(
+        analyser,
+        LiveAnalysisOptions::default(),
+        AudioAnalyser::level,
+    )
+}
+
+fn read_waveform(analyser: &AudioAnalyser) -> Arc<[f32]> {
+    analyser.read(AnalysisDomain::Waveform).into()
+}
+
+fn read_spectrum(analyser: &AudioAnalyser) -> Arc<[f32]> {
+    analyser.read(AnalysisDomain::Spectrum).into()
+}
+
+fn use_scheduled_analysis<T: 'static>(
+    analyser: ReadSignal<Option<AudioAnalyser>>,
+    options: LiveAnalysisOptions,
+    collect: fn(&AudioAnalyser) -> T,
+) -> ReadSignal<Option<T>> {
+    let parameters = use_memo(use_reactive!(|(analyser, options)| (analyser, options)));
+    #[allow(unused_mut)]
+    let mut value = use_signal(|| None::<T>);
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    let scheduler = use_live_analysis_scheduler();
+
+    use_effect(move || {
+        let (analyser, options) = parameters();
+        value.set(None);
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let generation = scheduler.next_generation();
+            let Some(source_analyser) = analyser() else {
+                return;
+            };
+            let scheduler = scheduler.clone();
+            let scheduler_for_publish = scheduler.clone();
+            spawn(run_live_analysis_schedule(
+                scheduler,
+                generation,
+                options.cadence(),
+                move || {
+                    if analyser.peek().as_ref() != Some(&source_analyser) {
+                        return false;
+                    }
+                    let next = collect(&source_analyser);
+                    if !scheduler_for_publish.is_current(generation)
+                        || analyser.peek().as_ref() != Some(&source_analyser)
+                    {
+                        return false;
+                    }
+                    value.set(Some(next));
+                    true
+                },
+            ));
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            let _ = (analyser, options, collect);
+        }
+    });
+
+    value.into()
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) struct LiveAnalysisScheduler {
+    generation: Cell<u64>,
+    mounted: Cell<bool>,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl Default for LiveAnalysisScheduler {
+    fn default() -> Self {
+        Self {
+            generation: Cell::new(0),
+            mounted: Cell::new(true),
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl LiveAnalysisScheduler {
+    pub(crate) fn next_generation(&self) -> u64 {
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
+        generation
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.mounted.get() && self.generation.get() == generation
+    }
+
+    fn unmount(&self) {
+        self.mounted.set(false);
+        self.next_generation();
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct AnalysisUnmountGuard(Weak<LiveAnalysisScheduler>);
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl Drop for AnalysisUnmountGuard {
+    fn drop(&mut self) {
+        if let Some(scheduler) = self.0.upgrade() {
+            scheduler.unmount();
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) fn use_live_analysis_scheduler() -> Rc<LiveAnalysisScheduler> {
+    let scheduler = use_hook(|| Rc::new(LiveAnalysisScheduler::default()));
+    let scheduler_for_guard = Rc::downgrade(&scheduler);
+    use_hook(|| Rc::new(AnalysisUnmountGuard(scheduler_for_guard)));
+    scheduler
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) async fn run_live_analysis_schedule(
+    scheduler: Rc<LiveAnalysisScheduler>,
+    generation: u64,
+    cadence: Duration,
+    mut publish: impl FnMut() -> bool + 'static,
+) {
+    let cadence_millis = cadence.as_millis() as u32;
+    while scheduler.is_current(generation) {
+        if document_hidden() {
+            gloo_timers::future::TimeoutFuture::new(cadence_millis.max(250)).await;
+            continue;
+        }
+        if !publish() {
+            break;
+        }
+        gloo_timers::future::TimeoutFuture::new(cadence_millis).await;
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn document_hidden() -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .is_some_and(|document| document.hidden())
 }
 
 /// Reduce amplitude peaks to at most `buckets` values, preserving the maximum

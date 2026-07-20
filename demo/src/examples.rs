@@ -2,6 +2,7 @@
 
 pub mod analysis;
 pub mod devices;
+pub mod live_analysis;
 pub mod playback;
 pub mod recorder;
 pub mod styles;

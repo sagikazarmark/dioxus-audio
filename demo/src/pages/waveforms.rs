@@ -20,7 +20,7 @@ pub fn Waveforms() -> Element {
                 InlineCode { "Waveform" }
                 " selects a stored resolution by bucket budget and renders each channel without discarding signed shape. "
                 InlineCode { "WaveformRangeSelector" }
-                " reports a normalized selection from 0.0 to 1.0."
+                " reports an ordered selection in source seconds."
             },
             demo: rsx! { WaveformsExample {} },
             code: rsx! {

@@ -20,23 +20,97 @@ fn time_domain_amplitude_uses_the_full_byte_range() {
 }
 
 #[test]
-fn waveform_selection_clamps_orders_and_trims_complete_frames() {
-    let selection = WaveformSelection::new(0.75, 0.25);
-    assert_eq!(selection, WaveformSelection::new(0.25, 0.75));
-    assert_eq!(selection.start(), 0.25);
-    assert_eq!(selection.end(), 0.75);
+fn waveform_selection_is_an_ordered_source_time_interval() {
+    let selection = WaveformSelection::new(7.5, 2.5);
+
+    assert_eq!(selection, WaveformSelection::new(2.5, 7.5));
+    assert_eq!(selection.start(), 2.5);
+    assert_eq!(selection.end(), 7.5);
+    assert_eq!(selection.with_start(9.0), WaveformSelection::new(7.5, 7.5));
+    assert_eq!(selection.with_end(1.0), WaveformSelection::new(2.5, 2.5));
+    assert!(selection.with_start(9.0).is_collapsed());
+}
+
+#[test]
+fn waveform_selection_keeps_only_finite_non_negative_source_times() {
     assert_eq!(
-        selection.with_start(0.9),
-        WaveformSelection::new(0.75, 0.75)
+        WaveformSelection::new(f64::NAN, f64::INFINITY),
+        WaveformSelection::new(0.0, 0.0)
     );
-    assert_eq!(selection.with_end(0.1), WaveformSelection::new(0.25, 0.25));
-    assert!(
-        trim_interleaved_pcm(&[1_i16, 2, 3, 4], 1, WaveformSelection::new(0.3, 0.3)).is_empty()
+    assert_eq!(
+        WaveformSelection::new(f64::NEG_INFINITY, -2.0),
+        WaveformSelection::new(0.0, 0.0)
     );
 
-    let stereo = [1_i16, 2, 3, 4, 5, 6, 7, 8];
+    let selection = WaveformSelection::new(2.5, 7.5);
+    assert_eq!(selection.with_start(f64::NAN), selection);
+    assert_eq!(selection.with_end(f64::INFINITY), selection);
+}
+
+#[test]
+fn waveform_selection_clamps_to_duration_without_swapping_boundaries() {
     assert_eq!(
-        trim_interleaved_pcm(&stereo, 2, selection),
+        WaveformSelection::new(2.5, 7.5).clamped_to_duration(5.0),
+        WaveformSelection::new(2.5, 5.0)
+    );
+    assert_eq!(
+        WaveformSelection::new(7.5, 9.0).clamped_to_duration(5.0),
+        WaveformSelection::new(5.0, 5.0)
+    );
+
+    assert!(WaveformSelection::new(2.5, 5.0).is_playable_within(5.0));
+    assert!(!WaveformSelection::new(2.5, 2.5).is_playable_within(5.0));
+    assert!(!WaveformSelection::new(2.5, 7.5).is_playable_within(5.0));
+    assert!(!WaveformSelection::new(0.0, 1.0).is_playable_within(f64::NAN));
+}
+
+#[test]
+fn source_time_pcm_trimming_resolves_complete_channel_frames() {
+    let stereo_with_incomplete_frame = [1_i16, 2, 3, 4, 5, 6, 7, 8, 9];
+
+    assert_eq!(
+        trim_interleaved_pcm(
+            &stereo_with_incomplete_frame,
+            2,
+            4.0,
+            WaveformSelection::new(1.25, 2.25),
+        ),
         vec![3, 4, 5, 6]
+    );
+    assert_eq!(
+        trim_interleaved_pcm(
+            &stereo_with_incomplete_frame,
+            2,
+            4.0,
+            WaveformSelection::new(3.0, 7.0),
+        ),
+        vec![7, 8]
+    );
+    assert!(
+        trim_interleaved_pcm(
+            &stereo_with_incomplete_frame,
+            2,
+            4.0,
+            WaveformSelection::new(2.0, 2.0),
+        )
+        .is_empty()
+    );
+    assert!(
+        trim_interleaved_pcm(
+            &stereo_with_incomplete_frame,
+            0,
+            4.0,
+            WaveformSelection::new(1.0, 2.0),
+        )
+        .is_empty()
+    );
+    assert!(
+        trim_interleaved_pcm(
+            &stereo_with_incomplete_frame,
+            2,
+            f64::NAN,
+            WaveformSelection::new(1.0, 2.0),
+        )
+        .is_empty()
     );
 }

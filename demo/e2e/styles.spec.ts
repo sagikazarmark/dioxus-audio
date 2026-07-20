@@ -98,9 +98,13 @@ test("scoped chapter starts with otherwise identical clip editors", async ({
     await expect(editor.getByText("Generated WAV Audio Data", { exact: true })).toBeVisible();
     await expect(editor.getByText("240 fixed Peaks", { exact: true })).toBeVisible();
     await expect(editor.getByText("2 second duration", { exact: true })).toBeVisible();
-    await expect(editor.getByText("18.0% - 82.0%", { exact: true })).toBeVisible();
-    await expect(editor.getByRole("slider", { name: "Selection start" })).toHaveValue("18");
-    await expect(editor.getByRole("slider", { name: "Selection end" })).toHaveValue("82");
+    await expect(editor.getByText("0.36 s - 1.64 s", { exact: true })).toBeVisible();
+    const selectionStart = editor.getByRole("slider", { name: "Selection start" });
+    const selectionEnd = editor.getByRole("slider", { name: "Selection end" });
+    await expect(selectionStart).toHaveValue("0.36");
+    await expect(selectionStart).toHaveAttribute("aria-valuetext", "0.36 seconds");
+    await expect(selectionEnd).toHaveValue("1.64");
+    await expect(selectionEnd).toHaveAttribute("aria-valuetext", "1.64 seconds");
     await expect(editor.getByRole("button", { name: "Play", exact: true })).toBeEnabled();
   }
 });
@@ -515,9 +519,9 @@ test("scoped tokens stay local while range and Playback remain independent", asy
     Object.fromEntries(tokenNames.map((name) => [name, ""])),
   );
 
-  await citrus.getByRole("slider", { name: "Selection start" }).fill("31");
-  await expect(citrus.getByText("31.0% - 82.0%", { exact: true })).toBeVisible();
-  await expect(midnight.getByText("18.0% - 82.0%", { exact: true })).toBeVisible();
+  await citrus.getByRole("slider", { name: "Selection start" }).fill("0.62");
+  await expect(citrus.getByText("0.62 s - 1.64 s", { exact: true })).toBeVisible();
+  await expect(midnight.getByText("0.36 s - 1.64 s", { exact: true })).toBeVisible();
 
   await citrus.getByRole("button", { name: "Play", exact: true }).click();
   await expect(citrus.getByRole("button", { name: "Pause", exact: true })).toBeVisible();

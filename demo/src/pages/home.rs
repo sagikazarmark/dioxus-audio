@@ -39,7 +39,7 @@ fn features() -> Vec<Feature> {
         },
         Feature {
             title: "Waveform UI",
-            body: "Preview recorded peaks and edit a normalized range for trimming workflows.",
+            body: "Preview recorded Peaks and edit a source-time range for trimming workflows.",
             route: Route::Waveforms {},
             cta: "Explore waveforms",
         },

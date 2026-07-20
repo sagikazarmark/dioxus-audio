@@ -12,7 +12,7 @@ pub fn AnalysisExample() -> Element {
     let reduced = downsample_peaks(&source, buckets());
     let amplitude = peak_amplitude(&[128, 142, 96, 205, 81, 128]);
     let stereo = vec![0_i16, 10, 1, 11, 2, 12, 3, 13, 4, 14, 5, 15];
-    let trimmed = trim_interleaved_pcm(&stereo, 2, WaveformSelection::new(0.25, 0.75));
+    let trimmed = trim_interleaved_pcm(&stereo, 2, 2.0, WaveformSelection::new(0.5, 1.5));
 
     rsx! {
         div { class: "grid gap-5",

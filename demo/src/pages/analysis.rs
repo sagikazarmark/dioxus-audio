@@ -10,7 +10,7 @@ pub fn Analysis() -> Element {
         PageHeader {
             eyebrow: "Processing",
             title: "Process audio data without a browser",
-            intro: "Peak reduction, unsigned Web Audio amplitude measurement, normalized selections, and frame-safe PCM trimming are platform-independent helpers.",
+            intro: "Peak reduction, unsigned Web Audio amplitude measurement, source-time selections, and frame-safe PCM trimming are platform-independent helpers.",
         }
         ExampleSection {
             title: "Analysis helpers",
@@ -18,7 +18,7 @@ pub fn Analysis() -> Element {
             intro: rsx! {
                 "Use " InlineCode { "downsample_peaks" }
                 " for compact previews and " InlineCode { "trim_interleaved_pcm" }
-                " to keep channel frames aligned while applying a waveform selection."
+                " to keep channel frames aligned while applying a source-time Waveform Selection."
             },
             demo: rsx! { AnalysisExample {} },
             code: rsx! {

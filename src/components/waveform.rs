@@ -5,6 +5,8 @@ use dioxus::prelude::*;
 use crate::analysis::{WaveformSelection, downsample_peaks};
 use crate::waveform::{AmplitudeMode, AmplitudeSlice, SignedEnvelope, WaveformData};
 
+use super::format_accessible_duration;
+
 /// Render immutable Waveform Data as one responsive SVG path per channel.
 #[component]
 pub fn Waveform(
@@ -182,15 +184,33 @@ pub fn WaveformPreview(
 #[component]
 pub fn WaveformRangeSelector(
     peaks: Vec<u8>,
+    duration_secs: f64,
     selection: WaveformSelection,
     on_change: EventHandler<WaveformSelection>,
     #[props(default)] label: Option<String>,
 ) -> Element {
-    let start_percent = selection.start() * 100.0;
-    let end_percent = selection.end() * 100.0;
+    let duration_secs = if duration_secs.is_finite() && duration_secs > 0.0 {
+        duration_secs
+    } else {
+        0.0
+    };
+    let selection = selection.clamped_to_duration(duration_secs);
+    let start_percent = if duration_secs > 0.0 {
+        selection.start() / duration_secs * 100.0
+    } else {
+        0.0
+    };
+    let end_percent = if duration_secs > 0.0 {
+        selection.end() / duration_secs * 100.0
+    } else {
+        0.0
+    };
     let selection_width = end_percent - start_percent;
-    let collapsed = (selection_width).abs() < f64::EPSILON;
+    let collapsed = selection.is_collapsed();
     let label = label.unwrap_or_else(|| "Select audio range".to_string());
+    let start_value_text = format_accessible_duration(selection.start());
+    let end_value_text = format_accessible_duration(selection.end());
+    let disabled = duration_secs == 0.0;
 
     rsx! {
         div {
@@ -207,13 +227,15 @@ pub fn WaveformRangeSelector(
                 class: "dioxus-audio__range-input dioxus-audio__range-input--start",
                 r#type: "range",
                 min: "0",
-                max: "100",
-                step: "0.1",
-                value: "{start_percent}",
+                max: "{duration_secs}",
+                step: "any",
+                value: "{selection.start()}",
+                disabled,
                 aria_label: "Selection start",
+                aria_valuetext: start_value_text,
                 oninput: move |event| {
                     if let Ok(value) = event.value().parse::<f64>() {
-                        on_change.call(selection.with_start(value / 100.0));
+                        on_change.call(selection.with_start(value).clamped_to_duration(duration_secs));
                     }
                 },
             }
@@ -221,13 +243,15 @@ pub fn WaveformRangeSelector(
                 class: "dioxus-audio__range-input dioxus-audio__range-input--end",
                 r#type: "range",
                 min: "0",
-                max: "100",
-                step: "0.1",
-                value: "{end_percent}",
+                max: "{duration_secs}",
+                step: "any",
+                value: "{selection.end()}",
+                disabled,
                 aria_label: "Selection end",
+                aria_valuetext: end_value_text,
                 oninput: move |event| {
                     if let Ok(value) = event.value().parse::<f64>() {
-                        on_change.call(selection.with_end(value / 100.0));
+                        on_change.call(selection.with_end(value).clamped_to_duration(duration_secs));
                     }
                 },
             }

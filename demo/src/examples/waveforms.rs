@@ -5,14 +5,15 @@ use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::components::{Waveform, WaveformPreview, WaveformRangeSelector};
 use dioxus_audio::waveform::{SignedEnvelope, WaveformData, WaveformLevel};
 
-/// Render compact peaks and edit a normalized range over the same data.
+/// Render compact Peaks and edit a source-time range over the same data.
 #[component]
 pub fn WaveformsExample() -> Element {
+    let duration_secs = 12.0;
     let peaks = sample_peaks();
-    let magnitude = WaveformData::from_peaks(Duration::from_secs(12), peaks.clone())
+    let magnitude = WaveformData::from_peaks(Duration::from_secs_f64(duration_secs), peaks.clone())
         .expect("sample Peaks form valid Waveform Data");
     let signed_stereo = signed_stereo_data();
-    let mut selection = use_signal(|| WaveformSelection::new(0.18, 0.82));
+    let mut selection = use_signal(|| WaveformSelection::new(2.16, 9.84));
     let selected = selection();
 
     rsx! {
@@ -50,11 +51,12 @@ pub fn WaveformsExample() -> Element {
                 p { class: "mb-2 text-xs font-semibold uppercase tracking-wider text-base-content/45", "Range selector" }
                 WaveformRangeSelector {
                     peaks,
+                    duration_secs,
                     selection: selected,
                     on_change: move |next| selection.set(next),
                 }
                 p { class: "mt-3 text-center font-mono text-sm tabular-nums text-base-content/65",
-                    "{selected.start() * 100.0:.1}% - {selected.end() * 100.0:.1}%"
+                    "{selected.start():.2} s - {selected.end():.2} s"
                 }
             }
         }

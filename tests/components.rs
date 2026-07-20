@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::components::{
     AudioInputSelector, AudioPlayer, AudioScrubber, MicrophoneStatusIndicator,
     PlaybackAnnouncementLabels, PlaybackAudibilitySlider, PlaybackMuteButton,
@@ -6,7 +7,7 @@ use dioxus_audio::components::{
     PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton, RecorderAnnouncementLabels,
     RecorderCancelButton, RecorderClearButton, RecorderControls, RecorderPauseResumeButton,
     RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton, SpectrumVisualizer, Waveform,
-    WaveformPreview,
+    WaveformPreview, WaveformRangeSelector,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
 use dioxus_audio::playback::use_audio_player;
@@ -342,6 +343,50 @@ fn waveform_can_expose_an_accessible_description() {
 
     assert!(html.contains("role=\"img\""));
     assert!(html.contains("aria-label=\"Recorded waveform\""));
+}
+
+#[test]
+fn waveform_range_selectors_expose_independent_source_time_values() {
+    fn app() -> Element {
+        rsx! {
+            WaveformRangeSelector {
+                peaks: vec![0, 128, 255],
+                duration_secs: 5.0,
+                selection: WaveformSelection::new(1.256, 3.5),
+                on_change: move |_| {},
+                label: "Primary clip range",
+            }
+            WaveformRangeSelector {
+                peaks: vec![255, 128, 0],
+                duration_secs: 2.0,
+                selection: WaveformSelection::new(0.5, 1.5),
+                on_change: move |_| {},
+                label: "Secondary clip range",
+            }
+        }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+
+    assert_eq!(html.matches("type=\"range\"").count(), 4, "{html}");
+    assert_eq!(html.matches("step=\"any\"").count(), 4, "{html}");
+    assert!(html.contains("aria-label=\"Primary clip range\""), "{html}");
+    assert!(
+        html.contains("aria-label=\"Secondary clip range\""),
+        "{html}"
+    );
+    assert!(html.contains("max=\"5\""), "{html}");
+    assert!(html.contains("value=\"1.256\""), "{html}");
+    assert!(html.contains("aria-valuetext=\"1.26 seconds\""), "{html}");
+    assert!(html.contains("value=\"3.5\""), "{html}");
+    assert!(html.contains("aria-valuetext=\"3.5 seconds\""), "{html}");
+    assert!(html.contains("max=\"2\""), "{html}");
+    assert!(html.contains("value=\"0.5\""), "{html}");
+    assert!(html.contains("aria-valuetext=\"0.5 seconds\""), "{html}");
+    assert!(html.contains("value=\"1.5\""), "{html}");
+    assert!(html.contains("aria-valuetext=\"1.5 seconds\""), "{html}");
 }
 
 #[test]

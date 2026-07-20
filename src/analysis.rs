@@ -103,7 +103,10 @@ pub fn peak_amplitude(samples: &[u8]) -> u8 {
     ((u32::from(distance) * 255 + 64) / 128).min(255) as u8
 }
 
-/// A normalized selection within an audio timeline.
+/// An ordered source-time interval within an audio timeline.
+///
+/// Boundaries are finite, non-negative seconds. They may coincide while the
+/// selection is being edited, but a collapsed selection is not playable.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaveformSelection {
     start: f64,
@@ -112,16 +115,8 @@ pub struct WaveformSelection {
 
 impl WaveformSelection {
     pub fn new(start: f64, end: f64) -> Self {
-        let start = if start.is_finite() {
-            start.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let end = if end.is_finite() {
-            end.clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
+        let start = finite_non_negative(start);
+        let end = finite_non_negative(end);
 
         Self {
             start: start.min(end),
@@ -135,6 +130,10 @@ impl WaveformSelection {
 
     pub fn end(self) -> f64 {
         self.end
+    }
+
+    pub fn is_collapsed(self) -> bool {
+        self.start == self.end
     }
 
     pub fn with_start(self, start: f64) -> Self {
@@ -151,7 +150,7 @@ impl WaveformSelection {
 
     pub fn with_end(self, end: f64) -> Self {
         let end = if end.is_finite() {
-            end.clamp(self.start, 1.0)
+            end.max(self.start)
         } else {
             self.end
         };
@@ -160,23 +159,51 @@ impl WaveformSelection {
             end,
         }
     }
+
+    /// Clamp each boundary independently to an authoritative source duration.
+    pub fn clamped_to_duration(self, duration_secs: f64) -> Self {
+        let duration_secs = finite_non_negative(duration_secs);
+        Self {
+            start: self.start.min(duration_secs),
+            end: self.end.min(duration_secs),
+        }
+    }
+
+    /// Return whether this is a positive interval inside the source duration.
+    pub fn is_playable_within(self, duration_secs: f64) -> bool {
+        duration_secs.is_finite()
+            && duration_secs > 0.0
+            && !self.is_collapsed()
+            && self.end <= duration_secs
+    }
 }
 
-/// Trim interleaved PCM without splitting channel frames.
+fn finite_non_negative(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// Trim a source-time interval from interleaved PCM without splitting channel frames.
 pub fn trim_interleaved_pcm<T: Clone>(
     samples: &[T],
     channels: usize,
+    duration_secs: f64,
     selection: WaveformSelection,
 ) -> Vec<T> {
-    if channels == 0 {
+    if channels == 0 || !duration_secs.is_finite() || duration_secs <= 0.0 {
         return Vec::new();
     }
-    if selection.start() == selection.end() {
+
+    let selection = selection.clamped_to_duration(duration_secs);
+    if selection.is_collapsed() {
         return Vec::new();
     }
 
     let frame_count = samples.len() / channels;
-    let first_frame = (selection.start() * frame_count as f64).floor() as usize;
-    let end_frame = (selection.end() * frame_count as f64).ceil() as usize;
-    samples[first_frame * channels..end_frame.min(frame_count) * channels].to_vec()
+    let first_frame = (selection.start() / duration_secs * frame_count as f64).floor() as usize;
+    let end_frame = (selection.end() / duration_secs * frame_count as f64).ceil() as usize;
+    samples[first_frame.min(frame_count) * channels..end_frame.min(frame_count) * channels].to_vec()
 }

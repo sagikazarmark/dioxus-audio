@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use dioxus_audio::playback::{
     PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackGraphState, PlaybackLifecycle,
     PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackOptions, PlaybackPlayFailure,
-    PlaybackReadiness, PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure,
-    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange, PlaybackTransport, clamp_seek,
-    use_audio_player, use_audio_player_with_options,
+    PlaybackReadiness, PlaybackSource, PlaybackSourceAlternative, PlaybackSourceCrossOrigin,
+    PlaybackSourceFailure, PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange,
+    PlaybackTransport, clamp_seek, use_audio_player, use_audio_player_with_options,
 };
 use dioxus_audio::{AudioData, AudioError, AudioErrorKind};
 
@@ -48,6 +48,30 @@ fn url_playback_source_validates_and_preserves_its_descriptor() {
         .with_media_type("  ")
         .unwrap_err();
     assert_eq!(error.kind(), AudioErrorKind::InvalidConfiguration);
+}
+
+#[test]
+fn url_alternatives_declare_graph_eligibility_and_cross_origin_intent() {
+    let direct = PlaybackSourceAlternative::new("https://media.example/direct.wav").unwrap();
+    let anonymous = PlaybackSourceAlternative::new("https://media.example/anonymous.wav")
+        .unwrap()
+        .with_cross_origin(PlaybackSourceCrossOrigin::Anonymous);
+    let credentialed = PlaybackSourceAlternative::new("https://media.example/private.wav")
+        .unwrap()
+        .with_cross_origin(PlaybackSourceCrossOrigin::UseCredentials);
+
+    assert_eq!(direct.cross_origin(), None);
+    assert!(!direct.is_graph_eligible());
+    assert_eq!(
+        anonymous.cross_origin(),
+        Some(PlaybackSourceCrossOrigin::Anonymous)
+    );
+    assert!(anonymous.is_graph_eligible());
+    assert_eq!(
+        credentialed.cross_origin(),
+        Some(PlaybackSourceCrossOrigin::UseCredentials)
+    );
+    assert!(!credentialed.is_graph_eligible());
 }
 
 #[test]

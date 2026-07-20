@@ -5,6 +5,11 @@ type GraphBrowserState = {
   contexts: AudioContext[];
   analyserNodes: AnalyserNode[];
   gainNodes: GainNode[];
+  graphAttachments: {
+    element: HTMLMediaElement;
+    crossOrigin: string | null;
+    src: string;
+  }[];
   closeCalls: number;
   disconnectCalls: number;
   detachedMedia: number;
@@ -23,6 +28,7 @@ async function installGraphInstrumentation(page: Page) {
       contexts: [],
       analyserNodes: [],
       gainNodes: [],
+      graphAttachments: [],
       closeCalls: 0,
       disconnectCalls: 0,
       detachedMedia: 0,
@@ -44,6 +50,17 @@ async function installGraphInstrumentation(page: Page) {
       const gain = createGain.call(this);
       state.gainNodes.push(gain);
       return gain;
+    };
+
+    const createMediaElementSource =
+      AudioContext.prototype.createMediaElementSource;
+    AudioContext.prototype.createMediaElementSource = function (element) {
+      state.graphAttachments.push({
+        element,
+        crossOrigin: element.crossOrigin,
+        src: element.getAttribute("src") ?? "",
+      });
+      return createMediaElementSource.call(this, element);
     };
 
     const close = AudioContext.prototype.close;
@@ -143,6 +160,220 @@ test("graph-backed Playback keeps pre-gain Analysis and stable graph identity", 
     detachedMedia: 3,
   });
   expect((await browserCounts(page)).disconnectCalls).toBeGreaterThanOrEqual(5);
+});
+
+test("anonymous-CORS alternatives support graph Analysis, gain, replacement, and unload", async ({
+  openRoute,
+  page,
+}) => {
+  await installGraphInstrumentation(page);
+  await page.route("https://media.example/allowed.wav", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "audio/wav",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: toneWav(440),
+    });
+  });
+  await openRoute("/graph-playback", "Analyse audio before effective graph gain");
+
+  const example = page.getByRole("group", { name: "Graph-backed Playback" });
+  const state = example.locator(".graph-playback-state");
+  const analysis = example.locator(".graph-analysis-state");
+  await example
+    .getByRole("button", { name: "Load graph-ineligible alternatives", exact: true })
+    .click();
+  await expect(state).toHaveAttribute("data-source", "failed");
+  await expect(state).toHaveAttribute("data-source-failure", "graph-ineligible");
+  await expect(state).toHaveAttribute(
+    "data-alternative-failures",
+    "graph-ineligible,graph-ineligible",
+  );
+  expect((await browserCounts(page)).graphAttachments).toBe(0);
+
+  await example
+    .getByRole("button", { name: "Load anonymous-CORS alternative", exact: true })
+    .click();
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute(
+    "data-selected-alternative",
+    "https://media.example/allowed.wav",
+  );
+  expect(
+    await page.evaluate(() =>
+      (window as GraphWindow).graphBrowserState!.graphAttachments.map(
+        ({ crossOrigin, src }) => ({ crossOrigin, src }),
+      ),
+    ),
+  ).toEqual([{ crossOrigin: "anonymous", src: "" }]);
+
+  await example.getByRole("button", { name: "Play graph tone", exact: true }).click();
+  await expect(state).toHaveAttribute("data-graph", "running");
+  await expect(state).toHaveAttribute("data-transport", "playing");
+  await expect
+    .poll(async () => Number(await analysis.getAttribute("data-analysis-level")))
+    .toBeGreaterThan(0.02);
+
+  await example.getByRole("button", { name: "Mute graph tone", exact: true }).click();
+  await example.getByRole("slider", { name: "Graph tone audibility" }).fill("0.35");
+  await expect(state).toHaveAttribute("data-muted", "true");
+  await expect(state).toHaveAttribute("data-audibility-level", "0.35");
+  await expect.poll(() => activeGain(page)).toBe(0);
+  await expect
+    .poll(async () => Number(await analysis.getAttribute("data-analysis-level")))
+    .toBeGreaterThan(0.02);
+
+  const beforeAudioDataReplacement = await browserCounts(page);
+  await example.getByRole("button", { name: "Replace graph tone", exact: true }).click();
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute("data-muted", "true");
+  await expect(state).toHaveAttribute("data-audibility-level", "0.35");
+  const afterAudioDataReplacement = await browserCounts(page);
+  expect(afterAudioDataReplacement).toMatchObject({
+    contexts: 1,
+    analysers: 1,
+    gains: 1,
+  });
+  expect(afterAudioDataReplacement.disconnectCalls).toBe(
+    beforeAudioDataReplacement.disconnectCalls + 1,
+  );
+  expect(afterAudioDataReplacement.detachedMedia).toBe(
+    beforeAudioDataReplacement.detachedMedia + 1,
+  );
+  await example.getByRole("button", { name: "Check retained Analyser" }).click();
+  await expect(example.locator(".retained-analyser-state")).toHaveAttribute(
+    "data-available",
+    "true",
+  );
+
+  const beforeUrlReplacement = await browserCounts(page);
+  await example
+    .getByRole("button", { name: "Load anonymous-CORS alternative", exact: true })
+    .click();
+  await expect(state).toHaveAttribute("data-source", "playable");
+  expect(await browserCounts(page)).toMatchObject({
+    contexts: 1,
+    analysers: 1,
+    gains: 1,
+    graphAttachments: 3,
+  });
+  const afterUrlReplacement = await browserCounts(page);
+  expect(afterUrlReplacement.disconnectCalls).toBe(
+    beforeUrlReplacement.disconnectCalls + 1,
+  );
+  expect(afterUrlReplacement.detachedMedia).toBe(
+    beforeUrlReplacement.detachedMedia + 1,
+  );
+  await example.getByRole("button", { name: "Check retained Analyser" }).click();
+  await expect(example.locator(".retained-analyser-state")).toHaveAttribute(
+    "data-available",
+    "true",
+  );
+
+  await example.getByRole("button", { name: "Unload graph tone", exact: true }).click();
+  await expect(state).toHaveAttribute("data-graph", "awaiting-source");
+  await expect(state).toHaveAttribute("data-analyser-available", "false");
+  await example.getByRole("button", { name: "Check retained Analyser" }).click();
+  await expect(example.locator(".retained-analyser-state")).toHaveAttribute(
+    "data-available",
+    "false",
+  );
+});
+
+test("denied anonymous CORS falls back across mixed Playback Source alternatives", async ({
+  openRoute,
+  page,
+}) => {
+  await installGraphInstrumentation(page);
+  const requests: string[] = [];
+  await page.route("https://media.example/*.wav", async (route) => {
+    requests.push(route.request().url());
+    const allowed = route.request().url().endsWith("/allowed.wav");
+    await route.fulfill({
+      status: 200,
+      contentType: "audio/wav",
+      headers: {
+        "Access-Control-Allow-Origin": allowed ? "*" : "https://denied.example",
+      },
+      body: toneWav(allowed ? 440 : 330),
+    });
+  });
+  await openRoute("/graph-playback", "Analyse audio before effective graph gain");
+
+  const example = page.getByRole("group", { name: "Graph-backed Playback" });
+  const state = example.locator(".graph-playback-state");
+  await example
+    .getByRole("button", {
+      name: "Load mixed Playback Source alternatives",
+      exact: true,
+    })
+    .click();
+
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute(
+    "data-selected-alternative",
+    "https://media.example/allowed.wav",
+  );
+  expect(requests).toEqual([
+    "https://media.example/denied.wav",
+    "https://media.example/allowed.wav",
+  ]);
+  expect(
+    await page.evaluate(() =>
+      (window as GraphWindow).graphBrowserState!.graphAttachments.map(
+        ({ crossOrigin, src }) => ({ crossOrigin, src }),
+      ),
+    ),
+  ).toEqual([
+    { crossOrigin: "anonymous", src: "" },
+    { crossOrigin: "anonymous", src: "" },
+  ]);
+  expect(await browserCounts(page)).toMatchObject({ contexts: 1, analysers: 1 });
+});
+
+test("failure after graph-backed alternative selection is terminal", async ({
+  openRoute,
+  page,
+}) => {
+  await installGraphInstrumentation(page);
+  const requests: string[] = [];
+  await page.route("https://media.example/*.wav", async (route) => {
+    requests.push(route.request().url());
+    await route.fulfill({
+      status: 200,
+      contentType: "audio/wav",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: toneWav(440),
+    });
+  });
+  await openRoute("/graph-playback", "Analyse audio before effective graph gain");
+
+  const example = page.getByRole("group", { name: "Graph-backed Playback" });
+  const state = example.locator(".graph-playback-state");
+  await example
+    .getByRole("button", { name: "Load selected-failure alternatives", exact: true })
+    .click();
+  await expect(state).toHaveAttribute(
+    "data-selected-alternative",
+    "https://media.example/allowed.wav",
+  );
+
+  await page.evaluate(() => {
+    const element = (window as GraphWindow).graphBrowserState!.graphAttachments[0]
+      .element;
+    Object.defineProperty(element, "error", {
+      configurable: true,
+      value: { code: 2 },
+    });
+    element.dispatchEvent(new Event("error"));
+  });
+  await expect(state).toHaveAttribute("data-source", "failed");
+  await expect(state).toHaveAttribute("data-source-failure", "network");
+  await expect(state).toHaveAttribute(
+    "data-selected-alternative",
+    "https://media.example/allowed.wav",
+  );
+  expect(requests).toEqual(["https://media.example/allowed.wav"]);
 });
 
 test("graph activation rejection and interruption pause media and can be retried", async ({
@@ -288,11 +519,38 @@ async function browserCounts(page: Page) {
       contexts: state.contexts.length,
       analysers: state.analyserNodes.length,
       gains: state.gainNodes.length,
+      graphAttachments: state.graphAttachments.length,
       closeCalls: state.closeCalls,
       disconnectCalls: state.disconnectCalls,
       detachedMedia: state.detachedMedia,
     };
   });
+}
+
+function toneWav(frequency: number): Buffer {
+  const sampleRate = 44_100;
+  const seconds = 2;
+  const sampleCount = sampleRate * seconds;
+  const dataSize = sampleCount * 2;
+  const bytes = Buffer.alloc(44 + dataSize);
+  bytes.write("RIFF", 0);
+  bytes.writeUInt32LE(36 + dataSize, 4);
+  bytes.write("WAVEfmt ", 8);
+  bytes.writeUInt32LE(16, 16);
+  bytes.writeUInt16LE(1, 20);
+  bytes.writeUInt16LE(1, 22);
+  bytes.writeUInt32LE(sampleRate, 24);
+  bytes.writeUInt32LE(sampleRate * 2, 28);
+  bytes.writeUInt16LE(2, 32);
+  bytes.writeUInt16LE(16, 34);
+  bytes.write("data", 36);
+  bytes.writeUInt32LE(dataSize, 40);
+  for (let index = 0; index < sampleCount; index += 1) {
+    const time = index / sampleRate;
+    const sample = Math.sin(frequency * time * Math.PI * 2) * 0.18;
+    bytes.writeInt16LE(Math.round(sample * 32_767), 44 + index * 2);
+  }
+  return bytes;
 }
 
 async function activeGain(page: Page) {

@@ -43,7 +43,7 @@ async function holdAlternativeLoads(
   }, supported);
 }
 
-test("URL Playback Sources load eagerly or remain dormant until play", async ({
+test("a direct Playback owner loads URL Playback Sources eagerly or on play", async ({
   openRoute,
   page,
 }) => {
@@ -66,6 +66,7 @@ test("URL Playback Sources load eagerly or remain dormant until play", async ({
   const state = example.locator(".url-playback-state");
   await expect(state).toHaveAttribute("data-source", "empty");
   await expect(state).toHaveAttribute("data-transport", "idle");
+  await expect(state).toHaveAttribute("data-graph", "not-requested");
   await expect
     .poll(() =>
       page.evaluate(
@@ -79,6 +80,7 @@ test("URL Playback Sources load eagerly or remain dormant until play", async ({
   await expect(state).toHaveAttribute("data-source", "playable");
   await expect(state).toHaveAttribute("data-selected-media-type", "audio/wav");
   await expect(state).toHaveAttribute("data-selected-alternative", /^blob:/);
+  await expect(state).toHaveAttribute("data-graph", "not-requested");
   await expect
     .poll(() =>
       page.evaluate(

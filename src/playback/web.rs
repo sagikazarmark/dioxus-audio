@@ -486,6 +486,12 @@ impl PlayerRuntime {
             PlaybackSourceInput::Url(alternatives) => {
                 while let Some(alternative) = alternatives.get(self.next_alternative).cloned() {
                     self.next_alternative += 1;
+                    if self.graph_requested() && !alternative.is_graph_eligible() {
+                        let failure = graph_ineligible_alternative_failure();
+                        self.record_alternative_failure(alternative, &failure);
+                        self.last_alternative_failure = Some(failure);
+                        continue;
+                    }
                     let definitely_unsupported = alternative
                         .media_type()
                         .is_some_and(|media_type| element.can_play_type(media_type).is_empty());
@@ -526,6 +532,10 @@ impl PlayerRuntime {
             Some(PlaybackSourceInput::Url(_))
         ) && self.lifecycle.selected_alternative().is_none();
         if tentative_url {
+            if let Some(graph) = self.graph.as_ref() {
+                graph.analyser.set_available(false);
+                self.lifecycle.graph_awaiting_source();
+            }
             if let Some(alternative) = alternative {
                 self.record_alternative_failure(alternative.clone(), &failure);
             }
@@ -727,6 +737,8 @@ fn attach_current_source(
         ));
     };
 
+    candidate.apply_cross_origin(&element);
+
     let graph_source = if candidate.is_graph_eligible() && runtime.borrow().graph_requested() {
         runtime.borrow_mut().lifecycle.graph_preparing();
         publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
@@ -751,6 +763,7 @@ fn attach_current_source(
                     );
                     PlaybackCommandError("browser rejected the Playback Source")
                 })?;
+                candidate.apply_cross_origin(&element);
                 None
             }
         }
@@ -1022,6 +1035,13 @@ fn unsupported_alternative_failure() -> PlaybackSourceFailure {
     ))
 }
 
+fn graph_ineligible_alternative_failure() -> PlaybackSourceFailure {
+    PlaybackSourceFailure::GraphIneligible(AudioError::new(
+        AudioErrorKind::PlaybackFailure,
+        "Playback Source alternative is ineligible for graph-backed Playback",
+    ))
+}
+
 fn unknown_alternative_failure() -> PlaybackSourceFailure {
     PlaybackSourceFailure::Unknown(AudioError::new(
         AudioErrorKind::PlaybackFailure,
@@ -1093,7 +1113,25 @@ impl WebPlayerInput {
     }
 
     fn is_graph_eligible(&self) -> bool {
-        matches!(self, Self::AudioData(_))
+        match self {
+            Self::AudioData(_) => true,
+            Self::Url(alternative) => alternative.is_graph_eligible(),
+        }
+    }
+
+    fn apply_cross_origin(&self, element: &HtmlAudioElement) {
+        let Self::Url(alternative) = self else {
+            return;
+        };
+        match alternative.cross_origin() {
+            Some(PlaybackSourceCrossOrigin::Anonymous) => {
+                element.set_cross_origin(Some("anonymous"));
+            }
+            Some(PlaybackSourceCrossOrigin::UseCredentials) => {
+                element.set_cross_origin(Some("use-credentials"));
+            }
+            None => {}
+        }
     }
 }
 

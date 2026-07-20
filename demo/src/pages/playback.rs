@@ -33,13 +33,13 @@ pub fn GraphPlayback() -> Element {
         PageHeader {
             eyebrow: "Playback-backed Analysis",
             title: "Analyse audio before effective graph gain",
-            intro: "Opt in once per Playback owner to retain a pre-gain Analyser and effective gain graph across eligible Audio Data replacement and unload.",
+            intro: "Opt in once per Playback owner to retain a pre-gain Analyser and effective gain graph across eligible Audio Data and anonymous-CORS Playback Source replacement and unload.",
         }
         ExampleSection {
             title: "Graph-backed Playback",
             layout: ExampleLayout::Columns,
             intro: rsx! {
-                "Activation coordinates the audio context and media element. Terminal graph setup failure degrades this owner to direct Playback without disabling ordinary transport."
+                "URL alternatives declare anonymous-CORS graph eligibility before attachment. Direct-only and credentialed alternatives remain available through ordinary direct Playback."
             },
             demo: rsx! { GraphPlaybackExample {} },
             code: rsx! {

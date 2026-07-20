@@ -546,6 +546,7 @@ fn format_time_ranges(ranges: &[PlaybackTimeRange]) -> String {
 fn source_failure_name(failure: Option<&PlaybackSourceFailure>) -> &'static str {
     match failure {
         None => "none",
+        Some(PlaybackSourceFailure::GraphIneligible(_)) => "graph-ineligible",
         Some(PlaybackSourceFailure::Unsupported(_)) => "unsupported",
         Some(PlaybackSourceFailure::Network(_)) => "network",
         Some(PlaybackSourceFailure::Decode(_)) => "decode",

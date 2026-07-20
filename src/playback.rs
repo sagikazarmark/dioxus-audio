@@ -25,11 +25,22 @@ pub enum PlaybackLoadingPolicy {
     OnPlay,
 }
 
+/// The cross-origin request policy for one URL-addressable Playback Source alternative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackSourceCrossOrigin {
+    /// Fetch without credentials and require CORS authorization.
+    Anonymous,
+    /// Fetch with credentials and require credentialed CORS authorization.
+    UseCredentials,
+}
+
 /// One validated URL-addressable Playback Source alternative.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaybackSourceAlternative {
     url: String,
     media_type: Option<String>,
+    cross_origin: Option<PlaybackSourceCrossOrigin>,
 }
 
 impl PlaybackSourceAlternative {
@@ -49,6 +60,7 @@ impl PlaybackSourceAlternative {
         Ok(Self {
             url,
             media_type: None,
+            cross_origin: None,
         })
     }
 
@@ -71,6 +83,25 @@ impl PlaybackSourceAlternative {
 
     pub fn media_type(&self) -> Option<&str> {
         self.media_type.as_deref()
+    }
+
+    /// Configure how the browser requests this cross-origin alternative.
+    ///
+    /// Alternatives without a policy remain direct-only. Anonymous CORS is
+    /// required before a URL alternative can be attached to a Playback graph.
+    pub fn with_cross_origin(mut self, cross_origin: PlaybackSourceCrossOrigin) -> Self {
+        self.cross_origin = Some(cross_origin);
+        self
+    }
+
+    pub fn cross_origin(&self) -> Option<PlaybackSourceCrossOrigin> {
+        self.cross_origin
+    }
+
+    /// Whether this alternative declares the anonymous-CORS intent required
+    /// for graph-backed Playback.
+    pub fn is_graph_eligible(&self) -> bool {
+        self.cross_origin == Some(PlaybackSourceCrossOrigin::Anonymous)
     }
 }
 
@@ -240,6 +271,8 @@ impl PlaybackTimeRange {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PlaybackSourceFailure {
+    /// The source cannot participate in an owner-requested Playback graph.
+    GraphIneligible(AudioError),
     Unsupported(AudioError),
     Network(AudioError),
     Decode(AudioError),
@@ -249,7 +282,8 @@ pub enum PlaybackSourceFailure {
 impl PlaybackSourceFailure {
     pub fn error(&self) -> &AudioError {
         match self {
-            Self::Unsupported(error)
+            Self::GraphIneligible(error)
+            | Self::Unsupported(error)
             | Self::Network(error)
             | Self::Decode(error)
             | Self::Unknown(error) => error,
@@ -258,6 +292,7 @@ impl PlaybackSourceFailure {
 
     pub fn kind(&self) -> PlaybackSourceFailureKind {
         match self {
+            Self::GraphIneligible(_) => PlaybackSourceFailureKind::GraphIneligible,
             Self::Unsupported(_) => PlaybackSourceFailureKind::Unsupported,
             Self::Network(_) => PlaybackSourceFailureKind::Network,
             Self::Decode(_) => PlaybackSourceFailureKind::Decode,
@@ -270,6 +305,7 @@ impl PlaybackSourceFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PlaybackSourceFailureKind {
+    GraphIneligible,
     Unsupported,
     Network,
     Decode,
@@ -335,7 +371,7 @@ pub enum PlaybackAudibilityCapability {
 pub enum PlaybackGraphState {
     /// This Playback owner uses ordinary direct media playback.
     NotRequested,
-    /// The graph is waiting for an eligible Audio Data source.
+    /// The graph is waiting for an eligible Playback Source.
     AwaitingSource,
     /// The graph is being created or attached to the current source.
     Preparing,
@@ -356,7 +392,7 @@ pub struct PlaybackOptions {
 }
 
 impl PlaybackOptions {
-    /// Request owner-lifetime graph-backed Playback for eligible Audio Data sources.
+    /// Request owner-lifetime graph-backed Playback for eligible Playback Sources.
     pub const fn graph_backed() -> Self {
         Self { graph_backed: true }
     }

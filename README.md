@@ -294,7 +294,7 @@ playable alternative. Initial failures continue to the next alternative, while a
 failure after selection is terminal and never switches media implicitly.
 If no alternative becomes playable, `PlaybackSnapshot::alternative_failures`
 reports each attempted or skipped alternative in order with an `unsupported`,
-`network`, `decode`, or `unknown` failure kind.
+`network`, `decode`, `graph-ineligible`, or `unknown` failure kind.
 
 `Eager` begins browser acquisition when the source becomes current. `OnPlay`
 keeps the source `Dormant` without an attached media resource until `play()` is
@@ -364,23 +364,47 @@ let analyser = player.analyser();
 ```
 
 The opt-in belongs to the Playback owner and cannot be switched reactively.
-The graph is created lazily when the first eligible Audio Data source is
-attached, then its context, pre-gain Analyser, and gain node persist across
-eligible replacement and unload. The graph state is orthogonal to source and
+The graph is created lazily when the first eligible Playback Source is attached,
+then its context, pre-gain Analyser, and gain node persist across replacement
+among eligible Audio Data and URL-backed Playback Sources, as well as unload.
+The graph state is orthogonal to source and
 transport state: it reports awaiting source, preparing, suspended, running,
 interaction required, or terminal unavailability. Direct Playback remains the
 default.
 
+URL-addressable alternatives are direct-only unless they explicitly request
+anonymous CORS:
+
+```rust
+use dioxus_audio::playback::{
+    PlaybackSource, PlaybackSourceAlternative, PlaybackSourceCrossOrigin,
+};
+
+let alternative = PlaybackSourceAlternative::new("https://media.example/episode.mp3")?
+    .with_media_type("audio/mpeg")?
+    .with_cross_origin(PlaybackSourceCrossOrigin::Anonymous);
+assert!(alternative.is_graph_eligible());
+let source = PlaybackSource::url(alternative);
+# Ok::<(), dioxus_audio::AudioError>(())
+```
+
+Playback applies the declared `crossOrigin` policy before graph attachment and
+before assigning `src`. The server must authorize the anonymous cross-origin
+request. Rejection is an initial source-attempt failure and may fall back to the
+next eligible alternative. Alternatives without a cross-origin policy and those
+using `UseCredentials` remain available to ordinary direct Playback, but a
+graph-backed owner skips them as `GraphIneligible` without speculative graph
+attachment.
+
 A graph-backed play request invokes context resume and media play in the same
 activation turn and reports `Playing` only after both succeed. Rejection or a
 later context suspension pauses the media and reports an interaction-required
-failure that can be retried. Analysis observes the source before mute and level
-gain, so visualizations remain meaningful at zero output gain. A terminal setup
-failure invalidates Analysis, permanently changes that owner's level capability
-to `BestEffortMediaElement`, and continues with direct transport. URL sources
-currently take that direct route and report its best-effort capability; an
-eligible Audio Data replacement can use the retained graph unless the owner has
-terminally degraded.
+failure that can be retried. Analysis observes the Playback Source before mute
+and level gain, so visualizations remain meaningful at zero output gain. A
+terminal setup failure invalidates Analysis, permanently changes that owner's
+level capability to `BestEffortMediaElement`, and continues with direct
+transport. A later failure of an already selected URL-addressable alternative is
+terminal and does not silently choose another alternative.
 
 The same Controller can drive independently arranged `PlaybackSeekSlider`,
 `PlaybackSkipButton`, `PlaybackStopButton`, `PlaybackPlayPauseButton`,

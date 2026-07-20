@@ -13,9 +13,9 @@ use dioxus_audio::components::{
 };
 use dioxus_audio::playback::{
     PlaybackGraphState, PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackOptions,
-    PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure, PlaybackSourceFailureKind,
-    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange, PlaybackTransport,
-    use_audio_player, use_audio_player_with_options,
+    PlaybackSource, PlaybackSourceAlternative, PlaybackSourceCrossOrigin,
+    PlaybackSourceFailure, PlaybackSourceFailureKind, PlaybackSourceLifecycle, PlaybackStatus,
+    PlaybackTimeRange, PlaybackTransport, use_audio_player, use_audio_player_with_options,
 };
 
 /// Lazily generate a two-second WAV tone when the player asks for its bytes.
@@ -197,6 +197,17 @@ fn GraphPlaybackOwner(on_analyser: EventHandler<AudioAnalyser>) -> Element {
     let analyser = analyser_signal();
     let analyser_available = analyser.as_ref().is_some_and(AudioAnalyser::is_available);
     let snapshot = controller.snapshot()();
+    let selected_url = snapshot
+        .selected_alternative
+        .as_ref()
+        .map(PlaybackSourceAlternative::url)
+        .unwrap_or("none");
+    let alternative_failures = snapshot
+        .alternative_failures
+        .iter()
+        .map(|failure| source_failure_kind_name(failure.kind()))
+        .collect::<Vec<_>>()
+        .join(",");
 
     use_effect(move || {
         if let Some(analyser) = analyser_signal() {
@@ -215,6 +226,9 @@ fn GraphPlaybackOwner(on_analyser: EventHandler<AudioAnalyser>) -> Element {
             "data-muted": snapshot.muted.to_string(),
             "data-audibility-level": snapshot.audibility_level.value().to_string(),
             "data-audibility-capability": format!("{:?}", snapshot.audibility_capability).to_ascii_lowercase(),
+            "data-selected-alternative": selected_url,
+            "data-source-failure": source_failure_name(snapshot.source_failure.as_ref()),
+            "data-alternative-failures": alternative_failures,
         }
         if analyser.is_some() {
             GraphPlaybackAnalysis { analyser: analyser_signal }
@@ -226,7 +240,7 @@ fn GraphPlaybackOwner(on_analyser: EventHandler<AudioAnalyser>) -> Element {
             }
         }
         p { class: "text-sm text-base-content/60",
-            "Analysis observes Audio Data before effective graph gain, so mute and level changes do not erase its input."
+            "Analysis observes eligible Audio Data or anonymous-CORS URL-addressable alternatives before effective graph gain, so mute and level changes do not erase its input."
         }
         div { class: "flex flex-wrap items-center gap-2",
             button {
@@ -234,6 +248,30 @@ fn GraphPlaybackOwner(on_analyser: EventHandler<AudioAnalyser>) -> Element {
                 r#type: "button",
                 onclick: move |_| source.set(Some(sine_wave(440.0).into())),
                 "Load graph tone"
+            }
+            button {
+                class: "btn btn-ghost btn-xs",
+                r#type: "button",
+                onclick: move |_| source.set(Some(anonymous_cors_playback_source())),
+                "Load anonymous-CORS alternative"
+            }
+            button {
+                class: "btn btn-ghost btn-xs",
+                r#type: "button",
+                onclick: move |_| source.set(Some(graph_ineligible_playback_source())),
+                "Load graph-ineligible alternatives"
+            }
+            button {
+                class: "btn btn-ghost btn-xs",
+                r#type: "button",
+                onclick: move |_| source.set(Some(mixed_playback_source())),
+                "Load mixed Playback Source alternatives"
+            }
+            button {
+                class: "btn btn-ghost btn-xs",
+                r#type: "button",
+                onclick: move |_| source.set(Some(selected_failure_playback_source())),
+                "Load selected-failure alternatives"
             }
             PlaybackPlayPauseButton {
                 controller,
@@ -268,6 +306,50 @@ fn GraphPlaybackOwner(on_analyser: EventHandler<AudioAnalyser>) -> Element {
             }
         }
     }
+}
+
+fn anonymous_cors_playback_source() -> PlaybackSource {
+    PlaybackSource::url(anonymous_cors_alternative(
+        "https://media.example/allowed.wav",
+    ))
+}
+
+fn graph_ineligible_playback_source() -> PlaybackSource {
+    PlaybackSource::url_alternatives(graph_ineligible_alternatives())
+        .expect("the graph example supplies URL-addressable alternatives")
+}
+
+fn graph_ineligible_alternatives() -> [PlaybackSourceAlternative; 2] {
+    let direct = PlaybackSourceAlternative::new("https://media.example/direct.wav")
+        .expect("the direct-only alternative is valid");
+    let credentialed = PlaybackSourceAlternative::new("https://media.example/private.wav")
+        .expect("the credentialed alternative is valid")
+        .with_cross_origin(PlaybackSourceCrossOrigin::UseCredentials);
+    [direct, credentialed]
+}
+
+fn mixed_playback_source() -> PlaybackSource {
+    let [direct, credentialed] = graph_ineligible_alternatives();
+    let denied = anonymous_cors_alternative("https://media.example/denied.wav");
+    let allowed = anonymous_cors_alternative("https://media.example/allowed.wav");
+    PlaybackSource::url_alternatives([direct, credentialed, denied, allowed])
+        .expect("the graph example supplies mixed URL-addressable alternatives")
+}
+
+fn selected_failure_playback_source() -> PlaybackSource {
+    PlaybackSource::url_alternatives([
+        anonymous_cors_alternative("https://media.example/allowed.wav"),
+        anonymous_cors_alternative("https://media.example/backup.wav"),
+    ])
+    .expect("the graph example supplies fallback URL-addressable alternatives")
+}
+
+fn anonymous_cors_alternative(url: &str) -> PlaybackSourceAlternative {
+    PlaybackSourceAlternative::new(url)
+        .expect("the URL-addressable alternative is valid")
+        .with_media_type("audio/wav")
+        .expect("the graph media type is valid")
+        .with_cross_origin(PlaybackSourceCrossOrigin::Anonymous)
 }
 
 #[component]
@@ -325,6 +407,7 @@ pub fn UrlPlaybackExample() -> Element {
                 class: "url-playback-state",
                 "data-source": source_lifecycle_name(&snapshot.source),
                 "data-transport": transport_name(snapshot.transport),
+                "data-graph": graph_state_name(snapshot.graph),
                 "data-readiness": format!("{:?}", snapshot.readiness).to_ascii_lowercase(),
                 "data-network": network_activity_name(snapshot.network),
                 "data-buffered": format_time_ranges(&snapshot.buffered),
@@ -489,6 +572,7 @@ fn source_failure_name(failure: Option<&PlaybackSourceFailure>) -> &'static str 
 
 fn source_failure_kind_name(kind: PlaybackSourceFailureKind) -> &'static str {
     match kind {
+        PlaybackSourceFailureKind::GraphIneligible => "graph-ineligible",
         PlaybackSourceFailureKind::Unsupported => "unsupported",
         PlaybackSourceFailureKind::Network => "network",
         PlaybackSourceFailureKind::Decode => "decode",

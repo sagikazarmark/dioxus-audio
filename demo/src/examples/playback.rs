@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::f32::consts::TAU;
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
@@ -8,12 +10,20 @@ use dioxus_audio::components::{
     PlaybackRateButton, PlaybackRepeatButton, PlaybackSeekSlider, PlaybackSkipButton,
     PlaybackStatusAnnouncer, PlaybackStopButton, WaveformPreview,
 };
-use dioxus_audio::playback::use_audio_player;
+use dioxus_audio::playback::{
+    PlaybackLoadingPolicy, PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure,
+    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTransport, use_audio_player,
+};
 
 /// Lazily generate a two-second WAV tone when the player asks for its bytes.
 #[component]
 pub fn PlaybackExample() -> Element {
-    let mut source = use_signal(|| None::<AudioData>);
+    rsx! { AudioDataPlaybackExample {} }
+}
+
+#[component]
+fn AudioDataPlaybackExample() -> Element {
+    let mut source = use_signal(|| None::<PlaybackSource>);
     let loaded = source.read().is_some();
     let custom_controller = use_audio_player(source.into(), Duration::from_secs(2));
 
@@ -28,7 +38,7 @@ pub fn PlaybackExample() -> Element {
             AudioPlayer {
                 source,
                 duration_secs: 2.0,
-                on_request_audio: move |_| source.set(Some(sine_wave(440.0))),
+                on_request_audio: move |_| source.set(Some(sine_wave(440.0).into())),
             }
             div {
                 class: "rounded-2xl border border-base-300 bg-base-100 p-4",
@@ -56,7 +66,7 @@ pub fn PlaybackExample() -> Element {
                         controller: custom_controller,
                         play_label: "Play custom tone".to_string(),
                         pause_label: "Pause custom tone".to_string(),
-                        on_request_audio: move |_| source.set(Some(sine_wave(440.0))),
+                        on_request_audio: move |_| source.set(Some(sine_wave(440.0).into())),
                     }
                     PlaybackSkipButton {
                         controller: custom_controller,
@@ -96,7 +106,7 @@ pub fn PlaybackExample() -> Element {
                         button {
                             class: "btn btn-ghost btn-xs",
                             r#type: "button",
-                            onclick: move |_| source.set(Some(sine_wave(660.0))),
+                            onclick: move |_| source.set(Some(sine_wave(660.0).into())),
                             "Replace"
                         }
                         button {
@@ -108,8 +118,178 @@ pub fn PlaybackExample() -> Element {
                     }
                 }
             }
+            a {
+                class: "btn btn-outline btn-sm justify-self-start",
+                href: "/playback-source",
+                "Show URL Playback Source"
+            }
         }
     }
+}
+
+#[component]
+pub fn UrlPlaybackExample() -> Element {
+    let application_urls = use_hook(|| Rc::new(ApplicationMediaUrls::default()));
+    let mut source = use_signal(|| None::<PlaybackSource>);
+    let controller = use_audio_player(source.into(), Duration::from_secs(2));
+    let snapshot = controller.snapshot()();
+    let eager_urls = application_urls.clone();
+    let on_play_urls = application_urls.clone();
+    let replacement_urls = application_urls.clone();
+    let selected_url = snapshot
+        .selected_alternative
+        .as_ref()
+        .map(PlaybackSourceAlternative::url)
+        .unwrap_or("none");
+    let selected_media_type = snapshot
+        .selected_alternative
+        .as_ref()
+        .and_then(PlaybackSourceAlternative::media_type)
+        .unwrap_or("none");
+
+    rsx! {
+        section {
+            class: "url-playback-example grid gap-3 rounded-2xl border border-base-300 bg-base-100 p-4",
+            role: "group",
+            aria_label: "URL Playback Source",
+            h3 { class: "font-semibold", "Application-owned Playback Source" }
+            p { class: "text-sm text-base-content/60",
+                "Switch between eager and genuinely dormant on-play loading of local browser media."
+            }
+            PlaybackStatusAnnouncer { controller }
+            div {
+                class: "url-playback-state",
+                "data-source": source_lifecycle_name(&snapshot.source),
+                "data-transport": transport_name(snapshot.transport),
+                "data-readiness": format!("{:?}", snapshot.readiness).to_ascii_lowercase(),
+                "data-selected-alternative": selected_url,
+                "data-selected-media-type": selected_media_type,
+                "data-source-failure": source_failure_name(snapshot.source_failure.as_ref()),
+                "data-play-failure": if snapshot.play_failure.is_some() { "present" } else { "none" },
+                "data-position": controller.position()().as_secs_f64().to_string(),
+            }
+            div { class: "flex flex-wrap items-center gap-2",
+                PlaybackPlayPauseButton {
+                    controller,
+                    play_label: "Play URL Playback Source".to_string(),
+                    pause_label: "Pause URL Playback Source".to_string(),
+                }
+                PlaybackStopButton {
+                    controller,
+                    label: "Stop URL Playback Source".to_string(),
+                }
+                button {
+                    class: "btn btn-ghost btn-xs",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let url = eager_urls.create(sine_wave(330.0));
+                        source.set(Some(playback_url_source(url, PlaybackLoadingPolicy::Eager)));
+                    },
+                    "Load eager URL"
+                }
+                button {
+                    class: "btn btn-ghost btn-xs",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let url = on_play_urls.create(sine_wave(330.0));
+                        source.set(Some(playback_url_source(url, PlaybackLoadingPolicy::OnPlay)));
+                    },
+                    "Load on-play URL"
+                }
+                button {
+                    class: "btn btn-ghost btn-xs",
+                    r#type: "button",
+                    onclick: move |_| {
+                        let url = replacement_urls.create(sine_wave(550.0));
+                        source.set(Some(playback_url_source(url, PlaybackLoadingPolicy::Eager)));
+                    },
+                    "Replace URL Playback Source"
+                }
+                button {
+                    class: "btn btn-ghost btn-xs",
+                    r#type: "button",
+                    onclick: move |_| source.set(None),
+                    "Unload URL Playback Source"
+                }
+            }
+            if let PlaybackStatus::Failed(error) = controller.status()() {
+                div { class: "url-playback-error", role: "alert", "{error}" }
+            }
+        }
+    }
+}
+
+fn playback_url_source(url: String, loading_policy: PlaybackLoadingPolicy) -> PlaybackSource {
+    let alternative = PlaybackSourceAlternative::new(url)
+        .and_then(|alternative| alternative.with_media_type("audio/wav"))
+        .expect("the local demo URL and media type are valid");
+    PlaybackSource::url(alternative).with_loading_policy(loading_policy)
+}
+
+fn source_lifecycle_name(source: &PlaybackSourceLifecycle) -> &'static str {
+    match source {
+        PlaybackSourceLifecycle::Empty => "empty",
+        PlaybackSourceLifecycle::Dormant => "dormant",
+        PlaybackSourceLifecycle::Loading => "loading",
+        PlaybackSourceLifecycle::Playable => "playable",
+        PlaybackSourceLifecycle::Failed => "failed",
+        _ => "unknown",
+    }
+}
+
+fn transport_name(transport: PlaybackTransport) -> &'static str {
+    match transport {
+        PlaybackTransport::Idle => "idle",
+        PlaybackTransport::PlayPending => "play-pending",
+        PlaybackTransport::Playing => "playing",
+        PlaybackTransport::Paused => "paused",
+        PlaybackTransport::Ended => "ended",
+        _ => "unknown",
+    }
+}
+
+fn source_failure_name(failure: Option<&PlaybackSourceFailure>) -> &'static str {
+    match failure {
+        None => "none",
+        Some(PlaybackSourceFailure::Unsupported(_)) => "unsupported",
+        Some(PlaybackSourceFailure::Network(_)) => "network",
+        Some(PlaybackSourceFailure::Decode(_)) => "decode",
+        Some(PlaybackSourceFailure::Unknown(_)) => "unknown",
+        Some(_) => "unknown",
+    }
+}
+
+#[derive(Default)]
+struct ApplicationMediaUrls(RefCell<Vec<String>>);
+
+impl ApplicationMediaUrls {
+    fn create(&self, audio: AudioData) -> String {
+        let url = application_object_url(audio)
+            .expect("the browser should create a local demo media URL");
+        self.0.borrow_mut().push(url.clone());
+        url
+    }
+}
+
+impl Drop for ApplicationMediaUrls {
+    fn drop(&mut self) {
+        for url in self.0.get_mut() {
+            let _ = web_sys::Url::revoke_object_url(url);
+        }
+    }
+}
+
+fn application_object_url(audio: AudioData) -> Result<String, String> {
+    let bytes = js_sys::Uint8Array::new_with_length(audio.bytes.len() as u32);
+    bytes.copy_from(&audio.bytes);
+    let parts = js_sys::Array::new();
+    parts.push(&bytes);
+    let properties = web_sys::BlobPropertyBag::new();
+    properties.set_type(&audio.mime_type);
+    let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &properties)
+        .map_err(|_| "could not create local demo media".to_string())?;
+    web_sys::Url::create_object_url_with_blob(&blob)
+        .map_err(|_| "could not address local demo media".to_string())
 }
 
 fn preview_peaks() -> Vec<u8> {

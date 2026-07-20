@@ -10,7 +10,7 @@ use dioxus_audio::components::{
     SpectrumVisualizer, Waveform, WaveformPreview, WaveformRangeSelector,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
-use dioxus_audio::playback::use_audio_player;
+use dioxus_audio::playback::{PlaybackSource, use_audio_player};
 use dioxus_audio::recorder::{
     MicrophoneStatus, RecorderOptions, RecorderStatus, use_audio_recorder,
 };
@@ -41,7 +41,7 @@ fn scrubber_has_an_accessible_name_and_namespaced_styles() {
 #[test]
 fn playback_commands_can_be_composed_as_independent_native_controls() {
     fn app() -> Element {
-        let source = use_signal(|| None::<dioxus_audio::AudioData>);
+        let source = use_signal(|| None::<PlaybackSource>);
         let controller = use_audio_player(source.into(), Duration::from_secs(20));
 
         rsx! {
@@ -91,7 +91,7 @@ fn playback_commands_can_be_composed_as_independent_native_controls() {
 #[test]
 fn stop_and_repeat_are_reusable_native_controls() {
     fn app() -> Element {
-        let source = use_signal(|| None::<dioxus_audio::AudioData>);
+        let source = use_signal(|| None::<PlaybackSource>);
         let controller = use_audio_player(source.into(), Duration::from_secs(20));
 
         rsx! {
@@ -119,7 +119,7 @@ fn stop_and_repeat_are_reusable_native_controls() {
 #[test]
 fn mute_and_audibility_level_are_reusable_native_controls() {
     fn app() -> Element {
-        let source = use_signal(|| None::<dioxus_audio::AudioData>);
+        let source = use_signal(|| None::<PlaybackSource>);
         let controller = use_audio_player(source.into(), Duration::from_secs(20));
 
         rsx! {
@@ -249,6 +249,7 @@ fn player_controls_have_explicit_accessible_names() {
     assert!(html.contains("data-source=\"empty\""));
     assert!(html.contains("data-transport=\"idle\""));
     assert!(html.contains("data-readiness=\"unavailable\""));
+    assert!(html.contains("data-source-failure=\"none\""));
     assert!(html.contains("data-play-failure=\"none\""));
     assert!(html.contains("data-repeat=\"false\""));
     assert!(html.contains("data-muted=\"false\""));
@@ -320,7 +321,7 @@ fn recorder_commands_can_be_composed_as_independent_native_controls() {
 #[test]
 fn optional_status_announcers_expose_only_coarse_localizable_state() {
     fn app() -> Element {
-        let source = use_signal(|| None::<dioxus_audio::AudioData>);
+        let source = use_signal(|| None::<PlaybackSource>);
         let player = use_audio_player(source.into(), Duration::from_secs(20));
         let selected = use_signal(|| None);
         let recorder = use_audio_recorder(RecorderOptions::default(), selected.into());

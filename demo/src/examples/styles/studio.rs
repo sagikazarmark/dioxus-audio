@@ -1,9 +1,9 @@
 use dioxus::prelude::*;
-use dioxus_audio::AudioData;
 use dioxus_audio::components::{
     AudioInputSelector, AudioPlayer, MicrophoneStatusIndicator, WaveformPreview,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
+use dioxus_audio::playback::PlaybackSource;
 use dioxus_audio::recorder::{MicrophoneStatus, RecorderStatus};
 
 use super::fixtures::{generated_audio, peaks};
@@ -13,7 +13,7 @@ use super::fixtures::{generated_audio, peaks};
 pub fn StudioExample() -> Element {
     let devices = use_audio_input_devices();
     let mut microphone_status = use_signal(ready_status);
-    let mut source = use_signal(|| None::<AudioData>);
+    let mut source = use_signal(|| None::<PlaybackSource>);
     let current_status = microphone_status();
 
     rsx! {
@@ -70,7 +70,7 @@ pub fn StudioExample() -> Element {
                     AudioPlayer {
                         source,
                         duration_secs: 2.0,
-                        on_request_audio: move |_| source.set(Some(generated_audio())),
+                        on_request_audio: move |_| source.set(Some(generated_audio().into())),
                     }
                 }
             }

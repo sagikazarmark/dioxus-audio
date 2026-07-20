@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::components::{AudioPlayer, WaveformRangeSelector};
+use dioxus_audio::playback::PlaybackSource;
 
 use super::fixtures::{generated_audio, peaks};
 
@@ -18,7 +19,7 @@ pub fn ScopedExample() -> Element {
 #[component]
 fn ClipEditor(#[props(into)] theme: String, #[props(into)] wrapper_class: String) -> Element {
     let mut selection = use_signal(|| WaveformSelection::new(0.36, 1.64));
-    let mut source = use_signal(|| Some(generated_audio()));
+    let mut source = use_signal(|| Some(PlaybackSource::from(generated_audio())));
     let selected = selection();
 
     rsx! {
@@ -56,7 +57,7 @@ fn ClipEditor(#[props(into)] theme: String, #[props(into)] wrapper_class: String
                 AudioPlayer {
                     source,
                     duration_secs: 2.0,
-                    on_request_audio: move |_| source.set(Some(generated_audio())),
+                    on_request_audio: move |_| source.set(Some(generated_audio().into())),
                 }
             }
         }

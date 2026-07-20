@@ -4,16 +4,18 @@ use dioxus::prelude::*;
 use dioxus_icons::lucide::{Pause, Play, Repeat2, RotateCcw, RotateCw, Square, Volume2, VolumeX};
 
 use super::AudioScrubber;
+use crate::AudioErrorKind;
 use crate::playback::{
     AudioPlayerController, PlaybackAudibilityCapability, PlaybackPlayFailure, PlaybackReadiness,
-    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTransport, use_audio_player,
+    PlaybackSource, PlaybackSourceFailure, PlaybackSourceLifecycle, PlaybackStatus,
+    PlaybackTransport, use_audio_player,
 };
-use crate::{AudioData, AudioErrorKind};
 
 /// Localizable messages emitted by [`PlaybackStatusAnnouncer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlaybackAnnouncementLabels {
     pub empty: String,
+    pub dormant: String,
     pub loading: String,
     pub ready: String,
     pub starting: String,
@@ -27,6 +29,7 @@ impl Default for PlaybackAnnouncementLabels {
     fn default() -> Self {
         Self {
             empty: "No audio loaded".to_string(),
+            dormant: "Audio ready to load".to_string(),
             loading: "Audio loading".to_string(),
             ready: "Audio ready".to_string(),
             starting: "Playback starting".to_string(),
@@ -45,8 +48,10 @@ pub fn PlaybackStatusAnnouncer(
     #[props(default)] labels: PlaybackAnnouncementLabels,
 ) -> Element {
     let status = controller.status()();
-    let transport = controller.snapshot()().transport;
-    let message = if transport == PlaybackTransport::PlayPending {
+    let snapshot = controller.snapshot()();
+    let message = if snapshot.source == PlaybackSourceLifecycle::Dormant {
+        labels.dormant.as_str()
+    } else if snapshot.transport == PlaybackTransport::PlayPending {
         labels.starting.as_str()
     } else {
         match status {
@@ -93,9 +98,10 @@ pub fn PlaybackPlayPauseButton(
     let can_request_audio = on_request_audio.is_some();
     let disabled = match &snapshot.source {
         PlaybackSourceLifecycle::Empty => !can_request_audio,
-        PlaybackSourceLifecycle::Loading => !requested,
-        PlaybackSourceLifecycle::Playable => false,
-        PlaybackSourceLifecycle::Failed(_) => true,
+        PlaybackSourceLifecycle::Dormant
+        | PlaybackSourceLifecycle::Loading
+        | PlaybackSourceLifecycle::Playable => false,
+        PlaybackSourceLifecycle::Failed => true,
     };
     let busy = pending
         || (requested
@@ -111,13 +117,15 @@ pub fn PlaybackPlayPauseButton(
         }
 
         match controller.snapshot()().source {
-            PlaybackSourceLifecycle::Playable => {
+            PlaybackSourceLifecycle::Dormant
+            | PlaybackSourceLifecycle::Loading
+            | PlaybackSourceLifecycle::Playable => {
                 if controller.play().is_ok() {
                     play_requested.set(false);
                 }
             }
-            PlaybackSourceLifecycle::Failed(_) => play_requested.set(false),
-            PlaybackSourceLifecycle::Empty | PlaybackSourceLifecycle::Loading => {}
+            PlaybackSourceLifecycle::Failed => play_requested.set(false),
+            PlaybackSourceLifecycle::Empty => {}
         }
     });
 
@@ -183,9 +191,8 @@ pub fn PlaybackRepeatButton(
     let snapshot = controller.snapshot()();
     let repeat = snapshot.repeat;
     let unsupported = matches!(
-        snapshot.source,
-        PlaybackSourceLifecycle::Failed(ref error)
-            if error.kind() == AudioErrorKind::UnsupportedPlatform
+        controller.status()(),
+        PlaybackStatus::Failed(ref error) if error.kind() == AudioErrorKind::UnsupportedPlatform
     );
 
     rsx! {
@@ -209,9 +216,8 @@ pub fn PlaybackMuteButton(
 ) -> Element {
     let snapshot = controller.snapshot()();
     let unsupported = matches!(
-        snapshot.source,
-        PlaybackSourceLifecycle::Failed(ref error)
-            if error.kind() == AudioErrorKind::UnsupportedPlatform
+        controller.status()(),
+        PlaybackStatus::Failed(ref error) if error.kind() == AudioErrorKind::UnsupportedPlatform
     );
 
     rsx! {
@@ -319,9 +325,8 @@ pub fn PlaybackRateButton(
         rates.first().copied()
     };
     let unsupported = matches!(
-        controller.snapshot()().source,
-        PlaybackSourceLifecycle::Failed(ref error)
-            if error.kind() == AudioErrorKind::UnsupportedPlatform
+        controller.status()(),
+        PlaybackStatus::Failed(ref error) if error.kind() == AudioErrorKind::UnsupportedPlatform
     );
     let rate_text = rate.to_string();
     let aria_label = format!("{label}: {rate_text}x");
@@ -367,7 +372,7 @@ pub fn PlaybackSeekSlider(
 
 #[component]
 pub fn AudioPlayer(
-    source: ReadSignal<Option<AudioData>>,
+    source: ReadSignal<Option<PlaybackSource>>,
     on_request_audio: EventHandler<()>,
     #[props(default = 0.0)] duration_secs: f64,
 ) -> Element {
@@ -388,6 +393,7 @@ pub fn AudioPlayer(
             "data-source": source_lifecycle_name(&snapshot.source),
             "data-transport": transport_state_name(snapshot.transport),
             "data-readiness": readiness_state_name(snapshot.readiness),
+            "data-source-failure": source_failure_name(snapshot.source_failure.as_ref()),
             "data-play-failure": play_failure_name(snapshot.play_failure.as_ref()),
             "data-repeat": if snapshot.repeat { "true" } else { "false" },
             "data-muted": if snapshot.muted { "true" } else { "false" },
@@ -457,9 +463,10 @@ fn playback_state_name(status: &PlaybackStatus) -> &'static str {
 fn source_lifecycle_name(source: &PlaybackSourceLifecycle) -> &'static str {
     match source {
         PlaybackSourceLifecycle::Empty => "empty",
+        PlaybackSourceLifecycle::Dormant => "dormant",
         PlaybackSourceLifecycle::Loading => "loading",
         PlaybackSourceLifecycle::Playable => "playable",
-        PlaybackSourceLifecycle::Failed(_) => "failed",
+        PlaybackSourceLifecycle::Failed => "failed",
     }
 }
 
@@ -488,6 +495,16 @@ fn play_failure_name(failure: Option<&PlaybackPlayFailure>) -> &'static str {
         None => "none",
         Some(PlaybackPlayFailure::InteractionRequired(_)) => "interaction-required",
         Some(PlaybackPlayFailure::Unknown(_)) => "unknown",
+    }
+}
+
+fn source_failure_name(failure: Option<&PlaybackSourceFailure>) -> &'static str {
+    match failure {
+        None => "none",
+        Some(PlaybackSourceFailure::Unsupported(_)) => "unsupported",
+        Some(PlaybackSourceFailure::Network(_)) => "network",
+        Some(PlaybackSourceFailure::Decode(_)) => "decode",
+        Some(PlaybackSourceFailure::Unknown(_)) => "unknown",
     }
 }
 

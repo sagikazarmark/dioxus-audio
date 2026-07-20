@@ -10,8 +10,9 @@
 ## Features
 
 - **Recording:** microphone permissions, capture lifecycle, elapsed time, peaks, and live analysis.
-- **Playback:** loading, playback lifecycle, stop/reset, whole-source repeat,
-  seeking, skipping, and playback rate.
+- **Playback:** Audio Data and URL-addressable Playback Sources, eager or on-play
+  loading, playback lifecycle, stop/reset, whole-source repeat, seeking, skipping,
+  and playback rate.
 - **Audio input devices:** enumeration, selection, permission requests, and device-change handling.
 - **Analysis:** bounded reactive snapshots, interpretable waveform and spectrum
   data, RMS levels, peak reduction, and PCM range trimming.
@@ -220,32 +221,58 @@ resampler, transformed output, or Playback source.
 ```rust
 use dioxus::prelude::*;
 use dioxus_audio::components::AudioPlayer;
-use dioxus_audio::AudioData;
+use dioxus_audio::playback::PlaybackSource;
 
 #[component]
 fn Player() -> Element {
-    let mut audio = use_signal(|| None::<AudioData>);
+    let mut source = use_signal(|| None::<PlaybackSource>);
 
     rsx! {
         AudioPlayer {
-            source: audio,
+            source,
             duration_secs: 42.0,
             on_request_audio: move |_| {
-                // Load bytes from your store, then call audio.set(Some(data)).
+                // Load Audio Data from your store, then convert it into a Playback Source.
+                // source.set(Some(data.into()));
             },
         }
     }
 }
 ```
 
-The player creates and revokes browser object URLs as its source changes.
-Playback rate changes do not reload the source or reset its position.
+The player creates and revokes browser object URLs for Audio Data as its source
+changes. Playback rate changes do not reload the source or reset its position.
+
+For URL-addressable media, construct one validated alternative with an optional
+media-type hint. Relative URLs are accepted; validation does not claim that the
+resource exists or that the browser can decode it.
+
+```rust
+use dioxus_audio::playback::{
+    PlaybackLoadingPolicy, PlaybackSource, PlaybackSourceAlternative,
+};
+
+let alternative = PlaybackSourceAlternative::new("/media/episode.mp3")?
+    .with_media_type("audio/mpeg")?;
+let source = PlaybackSource::url(alternative)
+    .with_loading_policy(PlaybackLoadingPolicy::OnPlay);
+# Ok::<(), dioxus_audio::AudioError>(())
+```
+
+`Eager` begins browser acquisition when the source becomes current. `OnPlay`
+keeps the source `Dormant` without an attached media resource until `play()` is
+requested. Pausing while an on-play source is still loading clears play intent
+without cancelling acquisition. URL ownership remains with the application:
+replacement, unload, and owner cleanup detach the media resource but never
+revoke an application-supplied URL, including an application-owned `blob:` URL.
 
 For custom controls, `use_audio_player` exposes a `PlaybackSnapshot` through
 `controller.snapshot()`. Source lifecycle, transport, readiness, and recoverable
-play failure are independent facets: a play request remains `PlayPending` until
-the browser confirms `Playing`, and an interaction-required rejection leaves the
-current source usable for retry.
+play failure are independent facets. URL selection and coarse terminal source
+failure are separately available through `selected_alternative` and
+`source_failure`. A play request remains `PlayPending` until the browser confirms
+`Playing`, and an interaction-required rejection leaves the current source
+usable for retry.
 
 Calling `controller.stop()` atomically pauses Playback, resets position to zero,
 invalidates an outstanding play request, and returns a loaded source to

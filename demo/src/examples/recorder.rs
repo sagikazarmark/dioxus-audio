@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use dioxus_audio::RecordedAudio;
 use dioxus_audio::components::{
     AudioInputSelector, AudioPlayer, LevelMeter, LiveWaveform, MicrophoneStatusIndicator,
     RecorderAnnouncementLabels, RecorderCancelButton, RecorderClearButton, RecorderControls,
@@ -6,11 +7,11 @@ use dioxus_audio::components::{
     SpectrumVisualizer, WaveformPreview,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
+use dioxus_audio::playback::PlaybackSource;
 use dioxus_audio::recorder::{
     RecorderOptions, RecorderStatus, RecordingConstraint, RecordingConstraints,
     is_recorder_mime_type_supported, use_audio_recorder,
 };
-use dioxus_audio::{AudioData, RecordedAudio};
 
 use crate::components::StatusChip;
 
@@ -32,19 +33,21 @@ pub fn RecorderExample() -> Element {
         sample_rate: Some(sample_rate),
         echo_cancellation: Some(RecordingConstraint::Ideal(false)),
         noise_suppression: Some(RecordingConstraint::Ideal(false)),
-        latency: Some(RecordingConstraint::Ideal(std::time::Duration::from_millis(20))),
+        latency: Some(RecordingConstraint::Ideal(
+            std::time::Duration::from_millis(20),
+        )),
     };
     options.mime_types.clear();
     let recorder = use_audio_recorder(options, devices.selected().into());
     let custom_recorder = use_audio_recorder(RecorderOptions::default(), devices.selected().into());
     let mut completed = use_signal(|| None::<RecordedAudio>);
-    let mut source = use_signal(|| None::<AudioData>);
+    let mut source = use_signal(|| None::<PlaybackSource>);
 
     use_effect(move || {
         if recorder.completed().read().is_some()
             && let Some(recording) = recorder.take_completed()
         {
-            source.set(Some(recording.audio.clone()));
+            source.set(Some(recording.audio.clone().into()));
             completed.set(Some(recording));
         }
     });

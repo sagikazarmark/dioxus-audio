@@ -5,8 +5,15 @@ use dioxus_audio::components::AudioStyles;
 
 use crate::components::{DemoFooter, DemoHeader, Sidebar, SidebarNavLink, SidebarNavSection};
 use crate::pages::{
-    analysis::Analysis, decoding::Decoding, devices::Devices, home::Home, not_found::NotFound,
-    playback::Playback, recorder::Recorder, styles::Styles, visualizers::Visualizers,
+    analysis::Analysis,
+    decoding::Decoding,
+    devices::Devices,
+    home::Home,
+    not_found::NotFound,
+    playback::{Playback, PlaybackSource},
+    recorder::Recorder,
+    styles::Styles,
+    visualizers::Visualizers,
     waveforms::Waveforms,
 };
 
@@ -21,6 +28,8 @@ pub enum Route {
     Recorder {},
     #[route("/playback")]
     Playback {},
+    #[route("/playback-source")]
+    PlaybackSource {},
     #[route("/devices")]
     Devices {},
     #[route("/visualizers")]
@@ -62,6 +71,7 @@ fn DemoLayout() -> Element {
                         SidebarNavLink { route: Route::Home {}, label: "Overview" }
                         SidebarNavLink { route: Route::Recorder {}, label: "Record and review" }
                         SidebarNavLink { route: Route::Playback {}, label: "Playback" }
+                        SidebarNavLink { route: Route::PlaybackSource {}, label: "URL Playback Source" }
                         SidebarNavLink { route: Route::Styles {}, label: "Style customization" }
                     }
                     SidebarNavSection { label: "Input",

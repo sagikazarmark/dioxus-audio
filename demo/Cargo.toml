@@ -20,7 +20,13 @@ dioxus = { version = "0.7", default-features = false, features = [
     "web",
 ] }
 dioxus-code = { version = "0.1", features = ["lang-css"] }
-web-sys = { version = "0.3", features = ["Location"] }
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "Location",
+    "Url",
+] }
 
 [profile.release]
 opt-level = "z"

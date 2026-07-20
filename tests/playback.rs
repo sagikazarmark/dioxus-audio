@@ -2,11 +2,85 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use dioxus_audio::playback::{
-    PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackLifecycle, PlaybackPlayFailure,
-    PlaybackReadiness, PlaybackSourceLifecycle, PlaybackStatus, PlaybackTransport, clamp_seek,
-    use_audio_player,
+    PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackLifecycle,
+    PlaybackLoadingPolicy, PlaybackPlayFailure, PlaybackReadiness, PlaybackSource,
+    PlaybackSourceAlternative, PlaybackSourceFailure, PlaybackSourceLifecycle, PlaybackStatus,
+    PlaybackTransport, clamp_seek, use_audio_player,
 };
 use dioxus_audio::{AudioData, AudioError, AudioErrorKind};
+
+#[test]
+fn url_playback_source_validates_and_preserves_its_descriptor() {
+    let alternative = PlaybackSourceAlternative::new("/media/tone.wav")
+        .unwrap()
+        .with_media_type("audio/wav")
+        .unwrap();
+    assert_eq!(alternative.url(), "/media/tone.wav");
+    assert_eq!(alternative.media_type(), Some("audio/wav"));
+
+    let source =
+        PlaybackSource::url(alternative).with_loading_policy(PlaybackLoadingPolicy::OnPlay);
+    assert_eq!(source.loading_policy(), PlaybackLoadingPolicy::OnPlay);
+
+    for invalid in ["", "   ", "audio\nfile.wav"] {
+        let error = PlaybackSourceAlternative::new(invalid).unwrap_err();
+        assert_eq!(error.kind(), AudioErrorKind::InvalidConfiguration);
+    }
+
+    let error = PlaybackSourceAlternative::new("/media/tone.wav")
+        .unwrap()
+        .with_media_type("  ")
+        .unwrap_err();
+    assert_eq!(error.kind(), AudioErrorKind::InvalidConfiguration);
+}
+
+#[test]
+fn audio_data_remains_an_eager_playback_source() {
+    let source = PlaybackSource::from(AudioData::new(vec![1, 2, 3], "audio/wav"));
+
+    assert_eq!(source.loading_policy(), PlaybackLoadingPolicy::Eager);
+}
+
+#[test]
+fn on_play_loading_can_be_paused_without_cancelling_the_source() {
+    let alternative = PlaybackSourceAlternative::new("/media/tone.wav").unwrap();
+    let mut playback = PlaybackLifecycle::default();
+
+    playback.dormant();
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Dormant);
+    assert_eq!(playback.transport(), PlaybackTransport::Idle);
+    assert_eq!(playback.readiness(), PlaybackReadiness::Unavailable);
+
+    playback.request_play().unwrap();
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Loading);
+    assert_eq!(playback.transport(), PlaybackTransport::PlayPending);
+    assert_eq!(playback.readiness(), PlaybackReadiness::LoadingMetadata);
+
+    playback.paused();
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Loading);
+    assert_eq!(playback.transport(), PlaybackTransport::Idle);
+
+    playback.metadata_loaded();
+    playback.url_playable(alternative.clone());
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Playable);
+    assert_eq!(playback.transport(), PlaybackTransport::Idle);
+    assert_eq!(playback.readiness(), PlaybackReadiness::Playable);
+    assert_eq!(playback.selected_alternative(), Some(&alternative));
+
+    let failure = PlaybackSourceFailure::Decode(AudioError::new(
+        AudioErrorKind::PlaybackFailure,
+        "browser could not decode the source",
+    ));
+    playback.source_failed(failure.clone());
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Failed);
+    assert_eq!(playback.source_failure(), Some(&failure));
+    assert_eq!(playback.selected_alternative(), Some(&alternative));
+
+    playback.unload();
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Empty);
+    assert_eq!(playback.source_failure(), None);
+    assert_eq!(playback.selected_alternative(), None);
+}
 
 #[test]
 fn seeking_is_clamped_to_a_finite_timeline() {
@@ -100,9 +174,10 @@ fn waiting_and_terminal_source_failure_do_not_contradict_transport() {
 
     let error = AudioError::new(AudioErrorKind::PlaybackFailure, "source failed");
     playback.failed(error.clone());
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Failed);
     assert_eq!(
-        playback.source(),
-        &PlaybackSourceLifecycle::Failed(error.clone())
+        playback.source_failure(),
+        Some(&PlaybackSourceFailure::Unknown(error.clone()))
     );
     assert_eq!(playback.transport(), PlaybackTransport::Idle);
     assert_eq!(playback.readiness(), PlaybackReadiness::Unavailable);
@@ -288,7 +363,7 @@ fn seeking_away_from_the_end_preserves_the_requested_position() {
 #[test]
 fn unsupported_playback_snapshot_is_neutral_for_server_rendering() {
     fn app() -> Element {
-        let source = use_signal(|| None::<AudioData>);
+        let source = use_signal(|| None::<PlaybackSource>);
         let player = use_audio_player(source.into(), Duration::from_secs(30));
         let snapshot = player.snapshot()();
 

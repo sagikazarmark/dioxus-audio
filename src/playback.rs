@@ -1,15 +1,121 @@
 //! Audio playback state and hooks.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
 
 use crate::AudioData;
 use crate::AudioError;
+use crate::AudioErrorKind;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
+
+/// When Playback attaches the current source to its media resource.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackLoadingPolicy {
+    /// Begin acquiring the source as soon as it becomes current.
+    #[default]
+    Eager,
+    /// Keep the source dormant until Playback is requested.
+    OnPlay,
+}
+
+/// One validated URL-addressable Playback Source alternative.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaybackSourceAlternative {
+    url: String,
+    media_type: Option<String>,
+}
+
+impl PlaybackSourceAlternative {
+    /// Validate a browser-resolvable URL reference.
+    ///
+    /// Relative references are accepted. Validation does not claim that the
+    /// resource exists or that the browser can decode it.
+    pub fn new(url: impl Into<String>) -> Result<Self, AudioError> {
+        let url = url.into();
+        if url.trim().is_empty() || url.chars().any(char::is_control) {
+            return Err(AudioError::new(
+                AudioErrorKind::InvalidConfiguration,
+                "Playback Source URL must be non-empty and contain no control characters",
+            ));
+        }
+
+        Ok(Self {
+            url,
+            media_type: None,
+        })
+    }
+
+    /// Add an advisory media-type hint.
+    pub fn with_media_type(mut self, media_type: impl Into<String>) -> Result<Self, AudioError> {
+        let media_type = media_type.into();
+        if media_type.trim().is_empty() || media_type.chars().any(char::is_control) {
+            return Err(AudioError::new(
+                AudioErrorKind::InvalidConfiguration,
+                "Playback Source media type must be non-empty and contain no control characters",
+            ));
+        }
+        self.media_type = Some(media_type);
+        Ok(self)
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn media_type(&self) -> Option<&str> {
+        self.media_type.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PlaybackSourceInput {
+    AudioData(Arc<AudioData>),
+    Url(PlaybackSourceAlternative),
+}
+
+/// One owned Playback input and its loading policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaybackSource {
+    input: PlaybackSourceInput,
+    loading_policy: PlaybackLoadingPolicy,
+}
+
+impl PlaybackSource {
+    pub fn audio_data(audio: AudioData) -> Self {
+        Self {
+            input: PlaybackSourceInput::AudioData(Arc::new(audio)),
+            loading_policy: PlaybackLoadingPolicy::Eager,
+        }
+    }
+
+    pub fn url(alternative: PlaybackSourceAlternative) -> Self {
+        Self {
+            input: PlaybackSourceInput::Url(alternative),
+            loading_policy: PlaybackLoadingPolicy::Eager,
+        }
+    }
+
+    pub fn with_loading_policy(mut self, loading_policy: PlaybackLoadingPolicy) -> Self {
+        self.loading_policy = loading_policy;
+        self
+    }
+
+    pub fn loading_policy(&self) -> PlaybackLoadingPolicy {
+        self.loading_policy
+    }
+}
+
+impl From<AudioData> for PlaybackSource {
+    fn from(audio: AudioData) -> Self {
+        Self::audio_data(audio)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -28,9 +134,10 @@ pub enum PlaybackStatus {
 #[non_exhaustive]
 pub enum PlaybackSourceLifecycle {
     Empty,
+    Dormant,
     Loading,
     Playable,
-    Failed(AudioError),
+    Failed,
 }
 
 /// The requested or confirmed transport state of Playback.
@@ -53,6 +160,27 @@ pub enum PlaybackReadiness {
     Metadata,
     Playable,
     Waiting,
+}
+
+/// A portable terminal failure of the current Playback Source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackSourceFailure {
+    Unsupported(AudioError),
+    Network(AudioError),
+    Decode(AudioError),
+    Unknown(AudioError),
+}
+
+impl PlaybackSourceFailure {
+    pub fn error(&self) -> &AudioError {
+        match self {
+            Self::Unsupported(error)
+            | Self::Network(error)
+            | Self::Decode(error)
+            | Self::Unknown(error) => error,
+        }
+    }
 }
 
 /// A play request failure that leaves the current source usable for retry.
@@ -123,6 +251,10 @@ pub struct PlaybackSnapshot {
     pub source: PlaybackSourceLifecycle,
     pub transport: PlaybackTransport,
     pub readiness: PlaybackReadiness,
+    /// The committed URL alternative, if the current source is URL-addressable.
+    pub selected_alternative: Option<PlaybackSourceAlternative>,
+    /// A terminal failure, separate from recoverable play-policy rejection.
+    pub source_failure: Option<PlaybackSourceFailure>,
     pub play_failure: Option<PlaybackPlayFailure>,
     /// Whole-source repeat preference, retained across source replacement and unload.
     pub repeat: bool,
@@ -140,6 +272,8 @@ impl Default for PlaybackSnapshot {
             source: PlaybackSourceLifecycle::Empty,
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::Unavailable,
+            selected_alternative: None,
+            source_failure: None,
             play_failure: None,
             repeat: false,
             muted: false,
@@ -200,6 +334,14 @@ impl PlaybackLifecycle {
         self.snapshot.play_failure.as_ref()
     }
 
+    pub fn selected_alternative(&self) -> Option<&PlaybackSourceAlternative> {
+        self.snapshot.selected_alternative.as_ref()
+    }
+
+    pub fn source_failure(&self) -> Option<&PlaybackSourceFailure> {
+        self.snapshot.source_failure.as_ref()
+    }
+
     pub fn repeat(&self) -> bool {
         self.snapshot.repeat
     }
@@ -246,6 +388,18 @@ impl PlaybackLifecycle {
         self.snapshot.source = PlaybackSourceLifecycle::Loading;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::LoadingMetadata;
+        self.snapshot.selected_alternative = None;
+        self.snapshot.source_failure = None;
+        self.snapshot.play_failure = None;
+    }
+
+    pub fn dormant(&mut self) {
+        self.status = PlaybackStatus::Ready;
+        self.snapshot.source = PlaybackSourceLifecycle::Dormant;
+        self.snapshot.transport = PlaybackTransport::Idle;
+        self.snapshot.readiness = PlaybackReadiness::Unavailable;
+        self.snapshot.selected_alternative = None;
+        self.snapshot.source_failure = None;
         self.snapshot.play_failure = None;
     }
 
@@ -253,23 +407,54 @@ impl PlaybackLifecycle {
         self.status = PlaybackStatus::Ready;
         self.snapshot.source = PlaybackSourceLifecycle::Playable;
         self.snapshot.readiness = PlaybackReadiness::Metadata;
+        self.snapshot.source_failure = None;
+    }
+
+    pub fn metadata_loaded(&mut self) {
+        if self.snapshot.source == PlaybackSourceLifecycle::Loading {
+            self.snapshot.readiness = PlaybackReadiness::Metadata;
+        }
+    }
+
+    pub fn url_playable(&mut self, alternative: PlaybackSourceAlternative) {
+        if self.snapshot.source == PlaybackSourceLifecycle::Loading {
+            self.status = PlaybackStatus::Ready;
+            self.snapshot.source = PlaybackSourceLifecycle::Playable;
+            self.snapshot.readiness = PlaybackReadiness::Playable;
+            self.snapshot.selected_alternative = Some(alternative);
+            self.snapshot.source_failure = None;
+        }
     }
 
     pub fn request_play(&mut self) -> Result<(), PlaybackCommandError> {
-        if matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable)
-            && matches!(
-                self.snapshot.transport,
-                PlaybackTransport::Idle | PlaybackTransport::Paused | PlaybackTransport::Ended
-            )
-        {
-            if self.snapshot.play_failure.take().is_some() {
-                self.status = PlaybackStatus::Ready;
-            }
-            self.snapshot.transport = PlaybackTransport::PlayPending;
-            Ok(())
-        } else {
-            Err(PlaybackCommandError("audio is not ready to play"))
+        if !matches!(
+            self.snapshot.transport,
+            PlaybackTransport::Idle | PlaybackTransport::Paused | PlaybackTransport::Ended
+        ) {
+            return Err(PlaybackCommandError("audio is not ready to play"));
         }
+
+        match self.snapshot.source {
+            PlaybackSourceLifecycle::Dormant => {
+                self.status = PlaybackStatus::Loading;
+                self.snapshot.source = PlaybackSourceLifecycle::Loading;
+                self.snapshot.readiness = PlaybackReadiness::LoadingMetadata;
+            }
+            PlaybackSourceLifecycle::Loading => {
+                self.status = PlaybackStatus::Loading;
+            }
+            PlaybackSourceLifecycle::Playable => {
+                if self.snapshot.play_failure.is_some() {
+                    self.status = PlaybackStatus::Ready;
+                }
+            }
+            PlaybackSourceLifecycle::Empty | PlaybackSourceLifecycle::Failed => {
+                return Err(PlaybackCommandError("audio is not ready to play"));
+            }
+        }
+        self.snapshot.play_failure = None;
+        self.snapshot.transport = PlaybackTransport::PlayPending;
+        Ok(())
     }
 
     pub fn playing(&mut self) {
@@ -309,7 +494,12 @@ impl PlaybackLifecycle {
             self.snapshot.transport,
             PlaybackTransport::PlayPending | PlaybackTransport::Playing
         ) {
-            self.snapshot.transport = PlaybackTransport::Paused;
+            if self.snapshot.source == PlaybackSourceLifecycle::Loading {
+                self.snapshot.transport = PlaybackTransport::Idle;
+                self.status = PlaybackStatus::Loading;
+            } else {
+                self.snapshot.transport = PlaybackTransport::Paused;
+            }
         }
         if matches!(self.status, PlaybackStatus::Playing) {
             self.status = PlaybackStatus::Paused;
@@ -338,14 +528,20 @@ impl PlaybackLifecycle {
     }
 
     pub fn play_rejected(&mut self, failure: PlaybackPlayFailure) {
-        if !matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable)
-            || !matches!(self.snapshot.transport, PlaybackTransport::PlayPending)
+        if !matches!(
+            self.snapshot.source,
+            PlaybackSourceLifecycle::Loading | PlaybackSourceLifecycle::Playable
+        ) || !matches!(self.snapshot.transport, PlaybackTransport::PlayPending)
         {
             return;
         }
 
         self.status = PlaybackStatus::Failed(failure.error().clone());
-        self.snapshot.transport = PlaybackTransport::Paused;
+        self.snapshot.transport = if self.snapshot.source == PlaybackSourceLifecycle::Loading {
+            PlaybackTransport::Idle
+        } else {
+            PlaybackTransport::Paused
+        };
         if self.snapshot.readiness == PlaybackReadiness::Waiting {
             self.snapshot.readiness = PlaybackReadiness::Metadata;
         }
@@ -369,10 +565,16 @@ impl PlaybackLifecycle {
     }
 
     pub fn failed(&mut self, error: AudioError) {
+        self.source_failed(PlaybackSourceFailure::Unknown(error));
+    }
+
+    pub fn source_failed(&mut self, failure: PlaybackSourceFailure) {
+        let error = failure.error().clone();
         self.status = PlaybackStatus::Failed(error.clone());
-        self.snapshot.source = PlaybackSourceLifecycle::Failed(error);
+        self.snapshot.source = PlaybackSourceLifecycle::Failed;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
+        self.snapshot.source_failure = Some(failure);
         self.snapshot.play_failure = None;
     }
 
@@ -381,6 +583,8 @@ impl PlaybackLifecycle {
         self.snapshot.source = PlaybackSourceLifecycle::Empty;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
+        self.snapshot.selected_alternative = None;
+        self.snapshot.source_failure = None;
         self.snapshot.play_failure = None;
     }
 }
@@ -503,7 +707,7 @@ impl AudioPlayerController {
 }
 
 pub fn use_audio_player(
-    source: ReadSignal<Option<AudioData>>,
+    source: ReadSignal<Option<PlaybackSource>>,
     initial_duration: Duration,
 ) -> AudioPlayerController {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -532,9 +736,11 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
         let preferences = snapshot.peek().clone();
         status.set(PlaybackStatus::Failed(error.clone()));
         snapshot.set(PlaybackSnapshot {
-            source: PlaybackSourceLifecycle::Failed(error),
+            source: PlaybackSourceLifecycle::Failed,
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::Unavailable,
+            selected_alternative: None,
+            source_failure: Some(PlaybackSourceFailure::Unsupported(error)),
             play_failure: None,
             repeat: preferences.repeat,
             muted: preferences.muted,

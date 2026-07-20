@@ -18,6 +18,14 @@ const documentedRoutes = [
     tabbed: false,
   },
   {
+    path: "/playback-source",
+    heading: "Load local and remote media by URL",
+    section: "URL Playback Source",
+    example: "Application-owned Playback Source",
+    source: "pub fn UrlPlaybackExample",
+    tabbed: false,
+  },
+  {
     path: "/devices",
     heading: "Discover and select microphones",
     section: "use_audio_input_devices",

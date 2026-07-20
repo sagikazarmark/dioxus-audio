@@ -1,13 +1,13 @@
 use dioxus::prelude::*;
-use dioxus_audio::AudioData;
 use dioxus_audio::components::{AudioPlayer, WaveformPreview};
+use dioxus_audio::playback::PlaybackSource;
 
 use super::fixtures::{generated_audio, peaks};
 
 // region: daisy-recipe
 #[component]
 pub fn DaisyExample() -> Element {
-    let mut source = use_signal(|| None::<AudioData>);
+    let mut source = use_signal(|| None::<PlaybackSource>);
 
     rsx! {
         article { class: "rounded-2xl border border-base-300 bg-base-100 p-5 shadow-sm sm:p-6",
@@ -29,7 +29,7 @@ pub fn DaisyExample() -> Element {
                 AudioPlayer {
                     source,
                     duration_secs: 2.0,
-                    on_request_audio: move |_| source.set(Some(generated_audio())),
+                    on_request_audio: move |_| source.set(Some(generated_audio().into())),
                 }
             }
         }

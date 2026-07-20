@@ -15,7 +15,7 @@ use crate::{AudioError, AudioErrorKind};
 const HAVE_FUTURE_DATA: u16 = 3;
 
 pub(super) fn use_web_audio_player(
-    source: ReadSignal<Option<AudioData>>,
+    source: ReadSignal<Option<PlaybackSource>>,
     initial_duration: Duration,
 ) -> AudioPlayerController {
     let status = use_signal(|| PlaybackStatus::Empty);
@@ -26,7 +26,6 @@ pub(super) fn use_web_audio_player(
     let runtime = use_hook(|| Rc::new(RefCell::new(PlayerRuntime::default())));
     let dioxus_runtime = DioxusRuntime::current();
     let dioxus_scope = dioxus_runtime.current_scope_id();
-    let source_input = use_memo(use_reactive!(|(source,)| source));
     let initial_duration = use_memo(use_reactive!(|(initial_duration,)| initial_duration));
 
     {
@@ -36,22 +35,30 @@ pub(super) fn use_web_audio_player(
 
     {
         let runtime = runtime.clone();
+        let dioxus_runtime = dioxus_runtime.clone();
         use_effect(move || {
-            let mut runtime_mut = runtime.borrow_mut();
-            runtime_mut.generation = runtime_mut.generation.wrapping_add(1);
-            runtime_mut.play_generation = runtime_mut.play_generation.wrapping_add(1);
-            runtime_mut.resource.take();
-            let generation = runtime_mut.generation;
-            drop(runtime_mut);
+            let source = source();
+            let (old_resource, generation) = {
+                let mut runtime_mut = runtime.borrow_mut();
+                runtime_mut.generation = runtime_mut.generation.wrapping_add(1);
+                runtime_mut.play_generation = runtime_mut.play_generation.wrapping_add(1);
+                let old_resource = runtime_mut.resource.take();
+                runtime_mut.source = source.clone();
+                (old_resource, runtime_mut.generation)
+            };
+            drop(old_resource);
             position.set(Duration::ZERO);
             duration.set(*initial_duration.peek());
-            let source = source_input();
-            let source = source.read();
             let Some(source) = source.as_ref() else {
                 runtime.borrow_mut().lifecycle.unload();
                 publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
                 return;
             };
+            if source.loading_policy == PlaybackLoadingPolicy::OnPlay {
+                runtime.borrow_mut().lifecycle.dormant();
+                publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
+                return;
+            }
             runtime.borrow_mut().lifecycle.loading();
             publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
             match WebPlayer::new(
@@ -66,18 +73,16 @@ pub(super) fn use_web_audio_player(
                 dioxus_scope,
             ) {
                 Ok(resource) => {
-                    resource.element.set_playback_rate(*rate.peek());
                     let runtime_ref = runtime.borrow();
-                    resource.element.set_loop(runtime_ref.lifecycle.repeat());
-                    resource.element.set_muted(runtime_ref.lifecycle.muted());
-                    resource
-                        .element
-                        .set_volume(runtime_ref.lifecycle.audibility_level().value());
+                    configure_resource(&resource, &runtime_ref.lifecycle, *rate.peek());
                     drop(runtime_ref);
                     runtime.borrow_mut().resource = Some(resource);
                 }
                 Err(error) => {
-                    runtime.borrow_mut().lifecycle.failed(error.clone());
+                    runtime
+                        .borrow_mut()
+                        .lifecycle
+                        .source_failed(PlaybackSourceFailure::Unknown(error));
                     publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
                 }
             }
@@ -105,23 +110,58 @@ pub(super) fn use_web_audio_player(
 
     let runtime_for_play = runtime.clone();
     let play: Callback<(), Result<(), PlaybackCommandError>> = use_callback(move |()| {
-        let (element, generation, play_generation, restart_ended) = {
+        let (generation, play_generation, restart_ended, source_to_attach) = {
             let mut runtime = runtime_for_play.borrow_mut();
             let restart_ended = matches!(runtime.lifecycle.status(), PlaybackStatus::Ended);
             runtime.lifecycle.request_play()?;
             runtime.play_generation = runtime.play_generation.wrapping_add(1);
             (
-                runtime
-                    .resource
-                    .as_ref()
-                    .map(|resource| resource.element.clone())
-                    .ok_or(PlaybackCommandError("audio is not loaded"))?,
                 runtime.generation,
                 runtime.play_generation,
                 restart_ended,
+                runtime
+                    .resource
+                    .is_none()
+                    .then(|| runtime.source.clone())
+                    .flatten(),
             )
         };
         publish_lifecycle(&runtime_for_play.borrow().lifecycle, status, snapshot);
+        if let Some(source) = source_to_attach {
+            let resource = match WebPlayer::new(
+                &source,
+                Rc::downgrade(&runtime_for_play),
+                generation,
+                status,
+                snapshot,
+                position,
+                duration,
+                dioxus_runtime.clone(),
+                dioxus_scope,
+            ) {
+                Ok(resource) => resource,
+                Err(error) => {
+                    let mut runtime = runtime_for_play.borrow_mut();
+                    runtime.play_generation = runtime.play_generation.wrapping_add(1);
+                    runtime
+                        .lifecycle
+                        .source_failed(PlaybackSourceFailure::Unknown(error));
+                    publish_lifecycle(&runtime.lifecycle, status, snapshot);
+                    return Err(PlaybackCommandError("browser rejected the Playback Source"));
+                }
+            };
+            {
+                let runtime = runtime_for_play.borrow();
+                configure_resource(&resource, &runtime.lifecycle, *rate.peek());
+            }
+            runtime_for_play.borrow_mut().resource = Some(resource);
+        }
+        let element = runtime_for_play
+            .borrow()
+            .resource
+            .as_ref()
+            .map(|resource| resource.element.clone())
+            .ok_or(PlaybackCommandError("audio is not loaded"))?;
         if restart_ended {
             element.set_current_time(0.0);
             position.set(Duration::ZERO);
@@ -138,9 +178,12 @@ pub(super) fn use_web_audio_player(
                 return Err(PlaybackCommandError("browser rejected playback"));
             }
         };
-        let runtime = runtime_for_play.clone();
+        let runtime = Rc::downgrade(&runtime_for_play);
         spawn(async move {
             let outcome = wasm_bindgen_futures::JsFuture::from(promise).await;
+            let Some(runtime) = runtime.upgrade() else {
+                return;
+            };
             let runtime_ref = runtime.borrow();
             if !runtime_ref.owner_active
                 || runtime_ref.generation != generation
@@ -313,6 +356,7 @@ pub(super) fn use_web_audio_player(
 
 struct PlayerRuntime {
     lifecycle: PlaybackLifecycle,
+    source: Option<PlaybackSource>,
     resource: Option<WebPlayer>,
     generation: u64,
     play_generation: u64,
@@ -323,6 +367,7 @@ impl Default for PlayerRuntime {
     fn default() -> Self {
         Self {
             lifecycle: PlaybackLifecycle::default(),
+            source: None,
             resource: None,
             generation: 0,
             play_generation: 0,
@@ -365,6 +410,7 @@ impl Drop for UnmountGuard {
                 runtime.owner_active = false;
                 runtime.generation = runtime.generation.wrapping_add(1);
                 runtime.play_generation = runtime.play_generation.wrapping_add(1);
+                runtime.source = None;
                 runtime.resource.take()
             };
             drop(resource);
@@ -374,20 +420,13 @@ impl Drop for UnmountGuard {
 
 struct WebPlayer {
     element: HtmlAudioElement,
-    _object_url: ObjectUrl,
-    on_loaded: Closure<dyn FnMut()>,
-    on_can_play: Closure<dyn FnMut()>,
-    on_time: Closure<dyn FnMut()>,
-    on_playing: Closure<dyn FnMut()>,
-    on_waiting: Closure<dyn FnMut()>,
-    on_pause: Closure<dyn FnMut()>,
-    on_ended: Closure<dyn FnMut()>,
-    on_error: Closure<dyn FnMut()>,
+    _object_url: Option<ObjectUrl>,
+    listeners: Vec<EventListener>,
 }
 
 impl WebPlayer {
     fn new(
-        source: &AudioData,
+        source: &PlaybackSource,
         runtime: Weak<RefCell<PlayerRuntime>>,
         generation: u64,
         status: Signal<PlaybackStatus>,
@@ -397,21 +436,31 @@ impl WebPlayer {
         dioxus_runtime: Rc<DioxusRuntime>,
         dioxus_scope: ScopeId,
     ) -> Result<Self, AudioError> {
-        let bytes = Uint8Array::new_with_length(source.bytes.len() as u32);
-        bytes.copy_from(&source.bytes);
-        let parts = js_sys::Array::new();
-        parts.push(&bytes);
-        let properties = web_sys::BlobPropertyBag::new();
-        properties.set_type(&source.mime_type);
-        let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &properties)
-            .map_err(playback_error)?;
-        let object_url =
-            ObjectUrl(Url::create_object_url_with_blob(&blob).map_err(playback_error)?);
-        let element = HtmlAudioElement::new_with_src(&object_url.0).map_err(playback_error)?;
-        element.set_preload("metadata");
+        let (source_url, object_url, selected_alternative) = match &source.input {
+            PlaybackSourceInput::AudioData(source) => {
+                let bytes = Uint8Array::new_with_length(source.bytes.len() as u32);
+                bytes.copy_from(&source.bytes);
+                let parts = js_sys::Array::new();
+                parts.push(&bytes);
+                let properties = web_sys::BlobPropertyBag::new();
+                properties.set_type(&source.mime_type);
+                let blob =
+                    web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &properties)
+                        .map_err(playback_error)?;
+                let object_url =
+                    ObjectUrl(Url::create_object_url_with_blob(&blob).map_err(playback_error)?);
+                (object_url.0.clone(), Some(object_url), None)
+            }
+            PlaybackSourceInput::Url(alternative) => {
+                (alternative.url.clone(), None, Some(alternative.clone()))
+            }
+        };
+        let element = HtmlAudioElement::new().map_err(playback_error)?;
+        element.set_preload("auto");
 
         let element_for_loaded = element.clone();
         let runtime_for_loaded = runtime.clone();
+        let url_source = selected_alternative.is_some();
         let dioxus_runtime_for_loaded = dioxus_runtime.clone();
         let on_loaded = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_loaded.in_scope(dioxus_scope, || {
@@ -420,24 +469,31 @@ impl WebPlayer {
                     if value.is_finite() && value > 0.0 {
                         duration.set(Duration::from_secs_f64(value));
                     }
-                    runtime.lifecycle.loaded();
+                    if url_source {
+                        runtime.lifecycle.metadata_loaded();
+                    } else {
+                        runtime.lifecycle.loaded();
+                    }
                     publish_lifecycle(&runtime.lifecycle, status, snapshot);
                 });
             });
         }) as Box<dyn FnMut()>);
-        add_listener(&element, "loadedmetadata", &on_loaded)?;
 
         let runtime_for_can_play = runtime.clone();
+        let selected_for_can_play = selected_alternative;
         let dioxus_runtime_for_can_play = dioxus_runtime.clone();
         let on_can_play = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_can_play.in_scope(dioxus_scope, || {
                 with_current_runtime(&runtime_for_can_play, generation, |runtime| {
-                    runtime.lifecycle.playable();
+                    if let Some(alternative) = selected_for_can_play.as_ref() {
+                        runtime.lifecycle.url_playable(alternative.clone());
+                    } else {
+                        runtime.lifecycle.playable();
+                    }
                     publish_lifecycle(&runtime.lifecycle, status, snapshot);
                 });
             });
         }) as Box<dyn FnMut()>);
-        add_listener(&element, "canplay", &on_can_play)?;
 
         let element_for_time = element.clone();
         let runtime_for_time = runtime.clone();
@@ -455,7 +511,6 @@ impl WebPlayer {
                 });
             });
         }) as Box<dyn FnMut()>);
-        add_listener(&element, "timeupdate", &on_time)?;
 
         let element_for_playing = element.clone();
         let runtime_for_playing = runtime.clone();
@@ -473,7 +528,6 @@ impl WebPlayer {
                 });
             });
         }) as Box<dyn FnMut()>);
-        add_listener(&element, "playing", &on_playing)?;
 
         let element_for_waiting = element.clone();
         let runtime_for_waiting = runtime.clone();
@@ -491,7 +545,6 @@ impl WebPlayer {
                 });
             });
         }) as Box<dyn FnMut()>);
-        add_listener(&element, "waiting", &on_waiting)?;
 
         let element_for_pause = element.clone();
         let runtime_for_pause = runtime.clone();
@@ -508,7 +561,6 @@ impl WebPlayer {
                 });
             });
         }) as Box<dyn FnMut()>);
-        add_listener(&element, "pause", &on_pause)?;
 
         let element_for_ended = element.clone();
         let runtime_for_ended = runtime.clone();
@@ -523,50 +575,98 @@ impl WebPlayer {
                 });
             });
         }) as Box<dyn FnMut()>);
-        add_listener(&element, "ended", &on_ended)?;
 
+        let element_for_error = element.clone();
         let runtime_for_error = runtime;
         let on_error = Closure::wrap(Box::new(move || {
             dioxus_runtime.in_scope(dioxus_scope, || {
                 with_current_runtime(&runtime_for_error, generation, |runtime| {
-                    let error = AudioError::new(
-                        AudioErrorKind::PlaybackFailure,
-                        "browser could not decode or play this audio",
-                    );
-                    runtime.lifecycle.failed(error);
+                    runtime.play_generation = runtime.play_generation.wrapping_add(1);
+                    runtime
+                        .lifecycle
+                        .source_failed(media_source_failure(&element_for_error));
                     publish_lifecycle(&runtime.lifecycle, status, snapshot);
                 });
             });
         }) as Box<dyn FnMut()>);
-        add_listener(&element, "error", &on_error)?;
 
-        Ok(Self {
+        let listeners = vec![
+            EventListener::new("loadedmetadata", on_loaded),
+            EventListener::new("canplay", on_can_play),
+            EventListener::new("timeupdate", on_time),
+            EventListener::new("playing", on_playing),
+            EventListener::new("waiting", on_waiting),
+            EventListener::new("pause", on_pause),
+            EventListener::new("ended", on_ended),
+            EventListener::new("error", on_error),
+        ];
+        let mut registered = 0;
+        for listener in &listeners {
+            if let Err(error) = add_listener(&element, listener.name, &listener.callback) {
+                for listener in &listeners[..registered] {
+                    remove_listener(&element, listener.name, &listener.callback);
+                }
+                return Err(error);
+            }
+            registered += 1;
+        }
+
+        let player = Self {
             element,
             _object_url: object_url,
-            on_loaded,
-            on_can_play,
-            on_time,
-            on_playing,
-            on_waiting,
-            on_pause,
-            on_ended,
-            on_error,
-        })
+            listeners,
+        };
+        player.element.set_src(&source_url);
+        player.element.load();
+        Ok(player)
     }
 }
 
 impl Drop for WebPlayer {
     fn drop(&mut self) {
-        remove_listener(&self.element, "loadedmetadata", &self.on_loaded);
-        remove_listener(&self.element, "canplay", &self.on_can_play);
-        remove_listener(&self.element, "timeupdate", &self.on_time);
-        remove_listener(&self.element, "playing", &self.on_playing);
-        remove_listener(&self.element, "waiting", &self.on_waiting);
-        remove_listener(&self.element, "pause", &self.on_pause);
-        remove_listener(&self.element, "ended", &self.on_ended);
-        remove_listener(&self.element, "error", &self.on_error);
+        for listener in &self.listeners {
+            remove_listener(&self.element, listener.name, &listener.callback);
+        }
         let _ = self.element.pause();
-        self.element.set_src("");
+        let _ = self.element.remove_attribute("src");
+        self.element.load();
+    }
+}
+
+struct EventListener {
+    name: &'static str,
+    callback: Closure<dyn FnMut()>,
+}
+
+impl EventListener {
+    fn new(name: &'static str, callback: Closure<dyn FnMut()>) -> Self {
+        Self { name, callback }
+    }
+}
+
+fn configure_resource(resource: &WebPlayer, lifecycle: &PlaybackLifecycle, rate: f64) {
+    resource.element.set_playback_rate(rate);
+    resource.element.set_loop(lifecycle.repeat());
+    resource.element.set_muted(lifecycle.muted());
+    resource
+        .element
+        .set_volume(lifecycle.audibility_level().value());
+}
+
+fn media_source_failure(element: &HtmlAudioElement) -> PlaybackSourceFailure {
+    let code = element.error().map(|error| error.code());
+    let error = |message| AudioError::new(AudioErrorKind::PlaybackFailure, message);
+    match code {
+        Some(2) => {
+            PlaybackSourceFailure::Network(error("browser could not acquire the Playback Source"))
+        }
+        Some(3) => {
+            PlaybackSourceFailure::Decode(error("browser could not decode the Playback Source"))
+        }
+        Some(4) => PlaybackSourceFailure::Unsupported(error(
+            "browser does not support the Playback Source",
+        )),
+        _ => PlaybackSourceFailure::Unknown(error("browser could not load the Playback Source")),
     }
 }
 

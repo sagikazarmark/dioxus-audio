@@ -1,10 +1,273 @@
 import { expect, test } from "./fixtures";
 
 type PlaybackTestWindow = typeof globalThis & {
+  createdPlaybackElements?: HTMLMediaElement[];
+  createdObjectUrls?: string[];
+  revokedObjectUrls?: string[];
+  heldPlaybackElements?: HTMLMediaElement[];
   pendingPlaybackElement?: HTMLMediaElement;
   rejectPendingPlayback?: () => void;
   resolvePendingPlayback?: () => void;
 };
+
+test("URL Playback Sources load eagerly or remain dormant until play", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const NativeAudio = window.Audio;
+    const elements: HTMLMediaElement[] = [];
+    (window as PlaybackTestWindow).createdPlaybackElements = elements;
+    Object.defineProperty(window, "Audio", {
+      configurable: true,
+      value: function Audio(source?: string) {
+        const element = new NativeAudio(source);
+        elements.push(element);
+        return element;
+      },
+    });
+  });
+  await openRoute("/playback-source", "Load local and remote media by URL");
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  await expect(state).toHaveAttribute("data-source", "empty");
+  await expect(state).toHaveAttribute("data-transport", "idle");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as PlaybackTestWindow).createdPlaybackElements?.length ?? -1,
+      ),
+    )
+    .toBe(0);
+
+  await example.getByRole("button", { name: "Load eager URL" }).click();
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute("data-selected-media-type", "audio/wav");
+  await expect(state).toHaveAttribute("data-selected-alternative", /^blob:/);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as PlaybackTestWindow).createdPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBe(1);
+
+  await example.getByRole("button", { name: "Load on-play URL" }).click();
+  await expect(state).toHaveAttribute("data-source", "dormant");
+  await expect(example.getByRole("status")).toHaveText("Audio ready to load");
+  await expect(state).toHaveAttribute("data-selected-alternative", "none");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as PlaybackTestWindow).createdPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBe(1);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const elements = (window as PlaybackTestWindow).createdPlaybackElements;
+        return elements?.[0]?.hasAttribute("src") ?? true;
+      }),
+    )
+    .toBe(false);
+
+  await example.getByRole("button", { name: "Play URL Playback Source" }).click();
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute("data-transport", "playing");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as PlaybackTestWindow).createdPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBe(2);
+
+  await example.getByRole("button", { name: "Replace URL Playback Source" }).click();
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute("data-transport", "idle");
+  await example.getByRole("button", { name: "Unload URL Playback Source" }).click();
+  await expect(state).toHaveAttribute("data-source", "empty");
+  await expect(state).toHaveAttribute("data-selected-alternative", "none");
+});
+
+test("pausing a loading on-play URL clears only play intent", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback-source", "Load local and remote media by URL");
+  await page.evaluate(() => {
+    const held: HTMLMediaElement[] = [];
+    (window as PlaybackTestWindow).heldPlaybackElements = held;
+    Object.defineProperty(HTMLMediaElement.prototype, "src", {
+      configurable: true,
+      get() {
+        return this.getAttribute("data-held-src") ?? "";
+      },
+      set(value: string) {
+        this.setAttribute("data-held-src", value);
+        held.push(this);
+      },
+    });
+    HTMLMediaElement.prototype.load = function () {};
+    HTMLMediaElement.prototype.play = function () {
+      (window as PlaybackTestWindow).pendingPlaybackElement = this;
+      return new Promise((resolve) => {
+        (window as PlaybackTestWindow).resolvePendingPlayback = () => resolve();
+      });
+    };
+    HTMLMediaElement.prototype.pause = function () {};
+  });
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  await example.getByRole("button", { name: "Load on-play URL" }).click();
+  await example.getByRole("button", { name: "Play URL Playback Source" }).click();
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-transport", "play-pending");
+
+  await example.getByRole("button", { name: "Pause URL Playback Source" }).click();
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-transport", "idle");
+
+  await page.evaluate(() => {
+    const element = (window as PlaybackTestWindow).pendingPlaybackElement;
+    element?.dispatchEvent(new Event("loadedmetadata"));
+    element?.dispatchEvent(new Event("canplay"));
+    (window as PlaybackTestWindow).resolvePendingPlayback?.();
+  });
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute("data-transport", "idle");
+  await expect(state).toHaveAttribute("data-selected-media-type", "audio/wav");
+});
+
+test("URL failure and stale source outcomes stay scoped to their source", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback-source", "Load local and remote media by URL");
+  await page.evaluate(() => {
+    const held: HTMLMediaElement[] = [];
+    (window as PlaybackTestWindow).heldPlaybackElements = held;
+    Object.defineProperty(HTMLMediaElement.prototype, "src", {
+      configurable: true,
+      get() {
+        return this.getAttribute("data-held-src") ?? "";
+      },
+      set(value: string) {
+        this.setAttribute("data-held-src", value);
+        held.push(this);
+      },
+    });
+    HTMLMediaElement.prototype.load = function () {};
+    HTMLMediaElement.prototype.play = function () {
+      return new Promise(() => {});
+    };
+  });
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  await example.getByRole("button", { name: "Load on-play URL" }).click();
+  await example.getByRole("button", { name: "Play URL Playback Source" }).click();
+  const first = await page.evaluateHandle(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[0],
+  );
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "error", {
+      configurable: true,
+      value: { code: 3 },
+    });
+    element.dispatchEvent(new Event("error"));
+  }, first);
+  await expect(state).toHaveAttribute("data-source", "failed");
+  await expect(state).toHaveAttribute("data-source-failure", "decode");
+  await expect(state).toHaveAttribute("data-selected-alternative", "none");
+
+  await example.getByRole("button", { name: "Replace URL Playback Source" }).click();
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await page.evaluate((element) => {
+    element.dispatchEvent(new Event("canplay"));
+    element.dispatchEvent(new Event("error"));
+    element.dispatchEvent(new Event("playing"));
+  }, first);
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-source-failure", "none");
+
+  await example.getByRole("button", { name: "Unload URL Playback Source" }).click();
+  await expect(state).toHaveAttribute("data-source", "empty");
+  await page.evaluate((element) => {
+    element.dispatchEvent(new Event("loadedmetadata"));
+    element.dispatchEvent(new Event("canplay"));
+    element.dispatchEvent(new Event("error"));
+  }, first);
+  await expect(state).toHaveAttribute("data-source", "empty");
+  await expect(state).toHaveAttribute("data-source-failure", "none");
+  await first.dispose();
+});
+
+test("the library revokes only its own Audio Data URLs", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const nativeCreate = URL.createObjectURL;
+    const nativeRevoke = URL.revokeObjectURL;
+    const created: string[] = [];
+    const revoked: string[] = [];
+    (window as PlaybackTestWindow).createdObjectUrls = created;
+    (window as PlaybackTestWindow).revokedObjectUrls = revoked;
+    URL.createObjectURL = function (object) {
+      const url = nativeCreate.call(this, object);
+      created.push(url);
+      return url;
+    };
+    URL.revokeObjectURL = function (url) {
+      revoked.push(url);
+      return nativeRevoke.call(this, url);
+    };
+  });
+  await openRoute("/playback-source", "Load local and remote media by URL");
+
+  const urlExample = page.getByRole("group", { name: "URL Playback Source" });
+  await urlExample.getByRole("button", { name: "Load eager URL" }).click();
+  await expect(urlExample.locator(".url-playback-state")).toHaveAttribute(
+    "data-source",
+    "playable",
+  );
+  await urlExample
+    .getByRole("button", { name: "Replace URL Playback Source" })
+    .click();
+  await urlExample
+    .getByRole("button", { name: "Unload URL Playback Source" })
+    .click();
+  const applicationUrls = await page.evaluate(
+    () => (window as PlaybackTestWindow).createdObjectUrls?.slice(0, 2) ?? [],
+  );
+  expect(applicationUrls).toHaveLength(2);
+  expect(
+    await page.evaluate(
+      () => (window as PlaybackTestWindow).revokedObjectUrls ?? [],
+    ),
+  ).toEqual([]);
+
+  await openRoute("/playback", "Load audio only when it is needed");
+  await page.getByRole("button", { name: "Play", exact: true }).click();
+  await page.getByRole("button", { name: "Replace", exact: true }).click();
+  await page.getByRole("button", { name: "Unload", exact: true }).click();
+  const ownership = await page.evaluate(() => ({
+    created: (window as PlaybackTestWindow).createdObjectUrls ?? [],
+    revoked: (window as PlaybackTestWindow).revokedObjectUrls ?? [],
+  }));
+  expect(ownership.created).toHaveLength(4);
+  expect(ownership.revoked.toSorted()).toEqual(ownership.created.toSorted());
+  expect(ownership.revoked).not.toContain(applicationUrls[0]);
+  expect(ownership.revoked).not.toContain(applicationUrls[1]);
+});
 
 test("generated audio can be played, paused, and resumed", async ({
   openRoute,

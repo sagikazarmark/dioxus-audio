@@ -1,6 +1,116 @@
+use std::fmt::Write as _;
+
 use dioxus::prelude::*;
 
 use crate::analysis::{WaveformSelection, downsample_peaks};
+use crate::waveform::{AmplitudeMode, AmplitudeSlice, SignedEnvelope, WaveformData};
+
+/// Render immutable Waveform Data as one responsive SVG path per channel.
+#[component]
+pub fn Waveform(
+    data: WaveformData,
+    #[props(default = 512)] bucket_budget: usize,
+    #[props(default = 96.0)] height: f64,
+    #[props(default)] label: Option<String>,
+) -> Element {
+    let height = if height.is_finite() {
+        height.max(1.0)
+    } else {
+        96.0
+    };
+    let view = data
+        .select(
+            std::time::Duration::ZERO..data.duration(),
+            bucket_budget.max(1),
+        )
+        .expect("Waveform Data and presentation budget are valid");
+    let channel_height = height / data.channel_count() as f64;
+    let paths = (0..data.channel_count())
+        .filter_map(|channel| {
+            let top = channel as f64 * channel_height;
+            match view.channel(channel)? {
+                AmplitudeSlice::Magnitudes(values) => {
+                    Some(magnitude_path(values, top, channel_height))
+                }
+                AmplitudeSlice::SignedEnvelopes(values) => {
+                    Some(signed_envelope_path(values, top, channel_height))
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let width = view.bucket_count().max(1);
+    let role = label.as_ref().map(|_| "img");
+    let amplitude_mode = match data.mode() {
+        AmplitudeMode::Magnitude => "magnitude",
+        AmplitudeMode::SignedEnvelope => "signed-envelope",
+    };
+    let channel_count = data.channel_count();
+    let resolution = view.resolution_index();
+    let bucket_count = view.bucket_count();
+
+    rsx! {
+        svg {
+            class: "dioxus-audio dioxus-audio__waveform dioxus-audio__waveform-data",
+            role,
+            "aria-label": label,
+            "aria-hidden": role.is_none(),
+            "data-amplitude-mode": amplitude_mode,
+            "data-channel-count": channel_count,
+            "data-resolution": resolution,
+            "data-bucket-count": bucket_count,
+            width: "100%",
+            height: "{height}",
+            view_box: "0 0 {width} {height}",
+            preserve_aspect_ratio: "none",
+            for path_data in paths {
+                path {
+                    class: "dioxus-audio__waveform-channel",
+                    d: path_data,
+                }
+            }
+        }
+    }
+}
+
+fn magnitude_path(values: &[f32], top: f64, height: f64) -> String {
+    let baseline = top + height;
+    let mut path = format!("M0 {baseline}");
+    for (index, value) in values.iter().enumerate() {
+        let x = index as f64;
+        let next_x = x + 1.0;
+        let y = baseline - f64::from(*value) * height;
+        let _ = write!(path, "L{x} {y}H{next_x}");
+    }
+    let _ = write!(path, "L{} {baseline}Z", values.len());
+    path
+}
+
+fn signed_envelope_path(values: &[SignedEnvelope], top: f64, height: f64) -> String {
+    let center = top + height / 2.0;
+    let amplitude_height = height / 2.0;
+    let upper = |value: SignedEnvelope| center - f64::from(value.max) * amplitude_height;
+    let lower = |value: SignedEnvelope| center - f64::from(value.min) * amplitude_height;
+
+    let mut path = format!("M0 {}", upper(values[0]));
+    for (index, value) in values.iter().copied().enumerate() {
+        let next_x = index + 1;
+        if index > 0 {
+            let _ = write!(path, "V{}", upper(value));
+        }
+        let _ = write!(path, "H{next_x}");
+    }
+
+    let last = values[values.len() - 1];
+    let _ = write!(path, "L{} {}", values.len(), lower(last));
+    for index in (0..values.len()).rev() {
+        if index + 1 < values.len() {
+            let _ = write!(path, "V{}", lower(values[index]));
+        }
+        let _ = write!(path, "H{index}");
+    }
+    path.push('Z');
+    path
+}
 
 #[component]
 pub fn WaveformPreview(

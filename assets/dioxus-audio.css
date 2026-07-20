@@ -63,7 +63,8 @@
   color: var(--_dxa-primary);
 }
 
-.dioxus-audio__waveform rect {
+.dioxus-audio__waveform rect,
+.dioxus-audio__waveform-channel {
   fill: currentColor;
 }
 

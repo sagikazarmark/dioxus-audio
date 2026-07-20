@@ -5,7 +5,7 @@ use dioxus_audio::components::{
     PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton, PlaybackSeekSlider,
     PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton, RecorderAnnouncementLabels,
     RecorderCancelButton, RecorderClearButton, RecorderControls, RecorderPauseResumeButton,
-    RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton, SpectrumVisualizer,
+    RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton, SpectrumVisualizer, Waveform,
     WaveformPreview,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
@@ -13,6 +13,7 @@ use dioxus_audio::playback::use_audio_player;
 use dioxus_audio::recorder::{
     MicrophoneStatus, RecorderOptions, RecorderStatus, use_audio_recorder,
 };
+use dioxus_audio::waveform::{SignedEnvelope, WaveformData, WaveformLevel};
 use std::time::Duration;
 
 #[test]
@@ -355,4 +356,86 @@ fn short_quiet_waveforms_fill_the_preview_and_keep_visible_contrast() {
 
     assert_eq!(html.matches("<rect").count(), 8);
     assert!(html.contains("height=\"8\""));
+}
+
+#[test]
+fn waveform_data_renders_each_channel_responsively() {
+    let data = WaveformData::from_magnitudes(
+        Duration::from_secs(2),
+        2,
+        vec![WaveformLevel::new(
+            Duration::from_secs(1),
+            vec![0.25, 1.0, 0.75, 0.5],
+        )],
+    )
+    .unwrap();
+
+    let html = dioxus_ssr::render_element(rsx! {
+        Waveform {
+            data,
+            height: 80.0,
+            label: "Stereo magnitude waveform".to_string(),
+        }
+    });
+
+    assert!(html.contains("role=\"img\""), "{html}");
+    assert!(
+        html.contains("aria-label=\"Stereo magnitude waveform\""),
+        "{html}"
+    );
+    assert!(html.contains("width=\"100%\""), "{html}");
+    assert_eq!(html.matches("<path").count(), 2, "{html}");
+    assert!(html.contains("data-amplitude-mode=\"magnitude\""), "{html}");
+    assert!(html.contains("data-channel-count=2"), "{html}");
+    assert!(html.contains("d=\"M0 40L0 30H1L1 0H2L2 40Z\""), "{html}");
+    assert!(html.contains("d=\"M0 80L0 50H1L1 60H2L2 80Z\""), "{html}");
+}
+
+#[test]
+fn waveform_data_keeps_signed_envelopes_visually_distinct_from_magnitudes() {
+    let magnitude = WaveformData::from_magnitudes(
+        Duration::from_secs(1),
+        1,
+        vec![WaveformLevel::new(Duration::from_secs(1), vec![0.5])],
+    )
+    .unwrap();
+    let signed = WaveformData::from_signed_envelopes(
+        Duration::from_secs(1),
+        1,
+        vec![WaveformLevel::new(
+            Duration::from_secs(1),
+            vec![SignedEnvelope {
+                min: -1.0,
+                max: 0.5,
+            }],
+        )],
+    )
+    .unwrap();
+
+    let magnitude_html = dioxus_ssr::render_element(rsx! {
+        Waveform { data: magnitude, height: 100.0 }
+    });
+    let signed_html = dioxus_ssr::render_element(rsx! {
+        Waveform { data: signed, height: 100.0 }
+    });
+
+    assert!(
+        magnitude_html.contains("data-amplitude-mode=\"magnitude\""),
+        "{magnitude_html}"
+    );
+    assert!(
+        signed_html.contains("data-amplitude-mode=\"signed-envelope\""),
+        "{signed_html}"
+    );
+    assert_ne!(magnitude_html, signed_html);
+    assert!(
+        magnitude_html.contains("d=\"M0 100L0 50H1L1 100Z\""),
+        "{magnitude_html}"
+    );
+    assert!(
+        signed_html.contains("d=\"M0 25H1L1 100H0Z\""),
+        "{signed_html}"
+    );
+    assert!(magnitude_html.contains("aria-hidden=true"));
+    assert!(signed_html.contains("aria-hidden=true"));
 }

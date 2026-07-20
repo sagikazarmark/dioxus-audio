@@ -10,13 +10,15 @@ pub fn Waveforms() -> Element {
         PageHeader {
             eyebrow: "Processing",
             title: "Preview and select waveform ranges",
-            intro: "Render recorded peak envelopes at any size and expose an accessible normalized range selector for trimming workflows.",
+            intro: "Render duration-aware magnitude or signed multichannel Waveform Data alongside compact Peaks and an accessible range selector.",
         }
         ExampleSection {
             title: "Waveform components",
             intro: rsx! {
                 InlineCode { "WaveformPreview" }
-                " downsamples peaks to fit its bar count. "
+                " downsamples Peaks to fit its bar count. "
+                InlineCode { "Waveform" }
+                " selects a stored resolution by bucket budget and renders each channel without discarding signed shape. "
                 InlineCode { "WaveformRangeSelector" }
                 " reports a normalized selection from 0.0 to 1.0."
             },

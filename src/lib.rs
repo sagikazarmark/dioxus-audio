@@ -7,6 +7,7 @@ mod error;
 pub mod playback;
 pub mod recorder;
 mod types;
+pub mod waveform;
 
 pub use error::{AudioError, AudioErrorKind};
 pub use types::{AudioData, AudioInputDevice, AudioInputId, RecordedAudio};

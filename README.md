@@ -183,6 +183,50 @@ be replaced with localized `value_text`. `PlaybackStatusAnnouncer` is an optiona
 polite live region for coarse lifecycle changes and never announces position or
 audibility changes.
 
+## Waveform Data
+
+`WaveformData` is an immutable, cheap-to-clone snapshot for duration-aware
+Waveforms. A snapshot has one amplitude mode, one channel count, and one or more
+resolutions ordered from finest to coarsest. Construction consumes flat
+channel-major buffers and rejects invalid spans, coverage, channel alignment,
+and amplitudes rather than repairing them.
+
+```rust
+use std::time::Duration;
+
+use dioxus::prelude::*;
+use dioxus_audio::components::Waveform;
+use dioxus_audio::waveform::WaveformData;
+
+#[component]
+fn RecordedWaveform() -> Element {
+    let data = WaveformData::from_peaks(
+        Duration::from_secs(4),
+        vec![12, 48, 180, 255, 160, 52, 24, 8],
+    )
+    .expect("positive duration and nonempty Peaks");
+
+    rsx! {
+        Waveform {
+            data,
+            bucket_budget: 256,
+            label: "Recorded waveform",
+        }
+    }
+}
+```
+
+`WaveformData::select` accepts a half-open source-time range and a per-channel
+bucket budget. It returns the finest fitting stored resolution, or the coarsest
+resolution when none fit, as borrowed channel slices without copying buckets.
+Clone and equality use shared snapshot identity, so independently reconstructed
+data intentionally counts as changed.
+
+Use `from_magnitudes` for normalized values in `0.0..=1.0` and
+`from_signed_envelopes` for ordered minimum/maximum pairs in `-1.0..=1.0`.
+`from_peaks` creates one evenly spaced mono Magnitude resolution; this conversion
+necessarily loses Peaks cadence, channel structure, and sign information.
+
 ## Platform Support
 
 Browser recording, playback, and device hooks require the

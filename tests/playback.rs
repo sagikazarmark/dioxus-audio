@@ -3,9 +3,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use dioxus_audio::playback::{
     PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackLifecycle,
-    PlaybackLoadingPolicy, PlaybackPlayFailure, PlaybackReadiness, PlaybackSource,
-    PlaybackSourceAlternative, PlaybackSourceFailure, PlaybackSourceLifecycle, PlaybackStatus,
-    PlaybackTransport, clamp_seek, use_audio_player,
+    PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackPlayFailure, PlaybackReadiness,
+    PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure, PlaybackSourceLifecycle,
+    PlaybackStatus, PlaybackTimeRange, PlaybackTransport, clamp_seek, use_audio_player,
 };
 use dioxus_audio::{AudioData, AudioError, AudioErrorKind};
 
@@ -203,6 +203,88 @@ fn waiting_and_terminal_source_failure_do_not_contradict_transport() {
     playback.unload();
     assert_eq!(playback.snapshot(), &Default::default());
     assert_eq!(playback.status(), &PlaybackStatus::Empty);
+}
+
+#[test]
+fn network_and_range_observations_are_orthogonal_and_may_shrink() {
+    let mut playback = PlaybackLifecycle::default();
+    playback.loaded();
+    playback.request_play().unwrap();
+    playback.playing();
+    playback.waiting();
+
+    playback.network_observed(PlaybackNetworkActivity::Stalled);
+    playback.ranges_changed(
+        [
+            PlaybackTimeRange::new(Duration::from_secs(5), Duration::from_secs(10)).unwrap(),
+            PlaybackTimeRange::new(Duration::ZERO, Duration::from_secs(6)).unwrap(),
+            PlaybackTimeRange::new(Duration::from_secs(10), Duration::from_secs(12)).unwrap(),
+            PlaybackTimeRange::new(Duration::from_secs(15), Duration::from_secs(20)).unwrap(),
+        ],
+        [PlaybackTimeRange::new(Duration::ZERO, Duration::from_secs(30)).unwrap()],
+    );
+
+    assert_eq!(playback.transport(), PlaybackTransport::Playing);
+    assert_eq!(playback.readiness(), PlaybackReadiness::Waiting);
+    assert_eq!(
+        playback.network_activity(),
+        PlaybackNetworkActivity::Stalled
+    );
+    assert_eq!(
+        &*playback.snapshot().buffered,
+        &[
+            PlaybackTimeRange::new(Duration::ZERO, Duration::from_secs(12)).unwrap(),
+            PlaybackTimeRange::new(Duration::from_secs(15), Duration::from_secs(20)).unwrap(),
+        ]
+    );
+    assert_eq!(
+        &*playback.snapshot().seekable,
+        &[PlaybackTimeRange::new(Duration::ZERO, Duration::from_secs(30)).unwrap()]
+    );
+
+    playback.ranges_changed(
+        [PlaybackTimeRange::new(Duration::from_secs(2), Duration::from_secs(3)).unwrap()],
+        [],
+    );
+
+    assert_eq!(
+        &*playback.snapshot().buffered,
+        &[PlaybackTimeRange::new(Duration::from_secs(2), Duration::from_secs(3)).unwrap()]
+    );
+    assert!(playback.snapshot().seekable.is_empty());
+
+    assert!(PlaybackTimeRange::new(Duration::ZERO, Duration::ZERO).is_err());
+    assert!(PlaybackTimeRange::new(Duration::from_secs(2), Duration::from_secs(1)).is_err());
+}
+
+#[test]
+fn network_and_range_observations_are_scoped_to_the_current_source() {
+    let range = PlaybackTimeRange::new(Duration::ZERO, Duration::from_secs(10)).unwrap();
+    let mut playback = PlaybackLifecycle::default();
+    playback.loading();
+    playback.network_observed(PlaybackNetworkActivity::Loading);
+    playback.ranges_changed([range], [range]);
+
+    playback.loading();
+    assert_eq!(
+        playback.network_activity(),
+        PlaybackNetworkActivity::Inactive
+    );
+    assert!(playback.snapshot().buffered.is_empty());
+    assert!(playback.snapshot().seekable.is_empty());
+
+    playback.network_observed(PlaybackNetworkActivity::Stalled);
+    playback.ranges_changed([range], [range]);
+    playback.source_failed(PlaybackSourceFailure::Network(AudioError::new(
+        AudioErrorKind::PlaybackFailure,
+        "source failed",
+    )));
+    assert_eq!(
+        playback.network_activity(),
+        PlaybackNetworkActivity::Inactive
+    );
+    assert!(playback.snapshot().buffered.is_empty());
+    assert!(playback.snapshot().seekable.is_empty());
 }
 
 #[test]

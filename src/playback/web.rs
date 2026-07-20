@@ -8,12 +8,14 @@ use gloo_timers::future::TimeoutFuture;
 use js_sys::Uint8Array;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{HtmlAudioElement, Url};
+use web_sys::{HtmlAudioElement, TimeRanges, Url};
 
 use super::*;
 use crate::{AudioError, AudioErrorKind};
 
 const HAVE_FUTURE_DATA: u16 = 3;
+const NETWORK_IDLE: u16 = 1;
+const NETWORK_LOADING: u16 = 2;
 
 pub(super) fn use_web_audio_player(
     source: ReadSignal<Option<PlaybackSource>>,
@@ -508,8 +510,12 @@ fn attach_current_source(
     let source_attempt = {
         let mut runtime = runtime.borrow_mut();
         runtime.advance_attempt();
+        runtime
+            .lifecycle
+            .source_attempt_started(candidate.is_url_addressable());
         runtime.source_attempt()
     };
+    publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
     let resource = WebPlayer::new(
         element,
         candidate,
@@ -740,6 +746,12 @@ enum WebPlayerInput {
     Url(PlaybackSourceAlternative),
 }
 
+impl WebPlayerInput {
+    fn is_url_addressable(&self) -> bool {
+        matches!(self, Self::Url(_))
+    }
+}
+
 impl WebPlayer {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -783,6 +795,7 @@ impl WebPlayer {
         let on_loaded = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_loaded.in_scope(dioxus_scope, || {
                 let value = element_for_loaded.duration();
+                let observations = media_observations(&element_for_loaded, url_source);
                 with_current_attempt(&runtime_for_loaded, source_attempt, |runtime| {
                     if value.is_finite() && value > 0.0 {
                         duration.set(Duration::from_secs_f64(value));
@@ -792,6 +805,7 @@ impl WebPlayer {
                     } else {
                         runtime.lifecycle.loaded();
                     }
+                    observations.apply(&mut runtime.lifecycle);
                     publish_lifecycle(&runtime.lifecycle, status, snapshot);
                 });
             });
@@ -801,8 +815,11 @@ impl WebPlayer {
         let selected_for_error = selected_alternative.clone();
         let selected_for_can_play = selected_alternative;
         let dioxus_runtime_for_can_play = dioxus_runtime.clone();
+        let element_for_can_play = element.clone();
         let on_can_play = Closure::wrap(Box::new(move || {
             dioxus_runtime_for_can_play.in_scope(dioxus_scope, || {
+                let observations =
+                    media_observations(&element_for_can_play, selected_for_can_play.is_some());
                 with_current_attempt(&runtime_for_can_play, source_attempt, |runtime| {
                     if let Some(alternative) = selected_for_can_play.as_ref() {
                         runtime.lifecycle.url_playable(alternative.clone());
@@ -810,6 +827,7 @@ impl WebPlayer {
                     } else {
                         runtime.lifecycle.playable();
                     }
+                    observations.apply(&mut runtime.lifecycle);
                     publish_lifecycle(&runtime.lifecycle, status, snapshot);
                 });
             });
@@ -865,6 +883,95 @@ impl WebPlayer {
                         publish_lifecycle(&runtime.lifecycle, status, snapshot);
                     }
                 });
+            });
+        }) as Box<dyn FnMut()>);
+
+        let element_for_load_start = element.clone();
+        let runtime_for_load_start = runtime.clone();
+        let dioxus_runtime_for_load_start = dioxus_runtime.clone();
+        let on_load_start = Closure::wrap(Box::new(move || {
+            dioxus_runtime_for_load_start.in_scope(dioxus_scope, || {
+                let observations = MediaObservations::read(
+                    &element_for_load_start,
+                    url_source.then_some(PlaybackNetworkActivity::Loading),
+                );
+                publish_media_observations(
+                    &runtime_for_load_start,
+                    source_attempt,
+                    observations,
+                    status,
+                    snapshot,
+                );
+            });
+        }) as Box<dyn FnMut()>);
+
+        let element_for_progress = element.clone();
+        let runtime_for_progress = runtime.clone();
+        let dioxus_runtime_for_progress = dioxus_runtime.clone();
+        let on_progress = Closure::wrap(Box::new(move || {
+            dioxus_runtime_for_progress.in_scope(dioxus_scope, || {
+                let observations = media_observations(&element_for_progress, url_source);
+                publish_media_observations(
+                    &runtime_for_progress,
+                    source_attempt,
+                    observations,
+                    status,
+                    snapshot,
+                );
+            });
+        }) as Box<dyn FnMut()>);
+
+        let element_for_suspend = element.clone();
+        let runtime_for_suspend = runtime.clone();
+        let dioxus_runtime_for_suspend = dioxus_runtime.clone();
+        let on_suspend = Closure::wrap(Box::new(move || {
+            dioxus_runtime_for_suspend.in_scope(dioxus_scope, || {
+                let observations = MediaObservations::read(
+                    &element_for_suspend,
+                    url_source.then_some(PlaybackNetworkActivity::Idle),
+                );
+                publish_media_observations(
+                    &runtime_for_suspend,
+                    source_attempt,
+                    observations,
+                    status,
+                    snapshot,
+                );
+            });
+        }) as Box<dyn FnMut()>);
+
+        let element_for_stalled = element.clone();
+        let runtime_for_stalled = runtime.clone();
+        let dioxus_runtime_for_stalled = dioxus_runtime.clone();
+        let on_stalled = Closure::wrap(Box::new(move || {
+            dioxus_runtime_for_stalled.in_scope(dioxus_scope, || {
+                let observations = MediaObservations::read(
+                    &element_for_stalled,
+                    url_source.then_some(PlaybackNetworkActivity::Stalled),
+                );
+                publish_media_observations(
+                    &runtime_for_stalled,
+                    source_attempt,
+                    observations,
+                    status,
+                    snapshot,
+                );
+            });
+        }) as Box<dyn FnMut()>);
+
+        let element_for_duration_change = element.clone();
+        let runtime_for_duration_change = runtime.clone();
+        let dioxus_runtime_for_duration_change = dioxus_runtime.clone();
+        let on_duration_change = Closure::wrap(Box::new(move || {
+            dioxus_runtime_for_duration_change.in_scope(dioxus_scope, || {
+                let observations = media_observations(&element_for_duration_change, url_source);
+                publish_media_observations(
+                    &runtime_for_duration_change,
+                    source_attempt,
+                    observations,
+                    status,
+                    snapshot,
+                );
             });
         }) as Box<dyn FnMut()>);
 
@@ -933,8 +1040,13 @@ impl WebPlayer {
         }) as Box<dyn FnMut()>);
 
         let listeners = vec![
+            EventListener::new("loadstart", on_load_start),
             EventListener::new("loadedmetadata", on_loaded),
+            EventListener::new("durationchange", on_duration_change),
             EventListener::new("canplay", on_can_play),
+            EventListener::new("progress", on_progress),
+            EventListener::new("suspend", on_suspend),
+            EventListener::new("stalled", on_stalled),
             EventListener::new("timeupdate", on_time),
             EventListener::new("playing", on_playing),
             EventListener::new("waiting", on_waiting),
@@ -960,6 +1072,65 @@ impl WebPlayer {
         player.element.load();
         Ok(player)
     }
+}
+
+struct MediaObservations {
+    network: Option<PlaybackNetworkActivity>,
+    buffered: Vec<PlaybackTimeRange>,
+    seekable: Vec<PlaybackTimeRange>,
+}
+
+impl MediaObservations {
+    fn read(element: &HtmlAudioElement, network: Option<PlaybackNetworkActivity>) -> Self {
+        Self {
+            network,
+            buffered: collect_time_ranges(element.buffered()),
+            seekable: collect_time_ranges(element.seekable()),
+        }
+    }
+
+    fn apply(self, lifecycle: &mut PlaybackLifecycle) {
+        if let Some(network) = self.network {
+            lifecycle.network_observed(network);
+        }
+        lifecycle.ranges_changed(self.buffered, self.seekable);
+    }
+}
+
+fn media_observations(element: &HtmlAudioElement, url_addressable: bool) -> MediaObservations {
+    let network = if url_addressable {
+        Some(match element.network_state() {
+            NETWORK_IDLE => PlaybackNetworkActivity::Idle,
+            NETWORK_LOADING => PlaybackNetworkActivity::Loading,
+            _ => PlaybackNetworkActivity::Unknown,
+        })
+    } else {
+        Some(PlaybackNetworkActivity::Inactive)
+    };
+    MediaObservations::read(element, network)
+}
+
+fn publish_media_observations(
+    runtime: &Weak<RefCell<PlayerRuntime>>,
+    source_attempt: SourceAttempt,
+    observations: MediaObservations,
+    status: Signal<PlaybackStatus>,
+    snapshot: Signal<PlaybackSnapshot>,
+) {
+    with_current_attempt(runtime, source_attempt, |runtime| {
+        observations.apply(&mut runtime.lifecycle);
+        publish_lifecycle(&runtime.lifecycle, status, snapshot);
+    });
+}
+
+fn collect_time_ranges(ranges: TimeRanges) -> Vec<PlaybackTimeRange> {
+    (0..ranges.length())
+        .filter_map(|index| {
+            let start = Duration::try_from_secs_f64(ranges.start(index).ok()?).ok()?;
+            let end = Duration::try_from_secs_f64(ranges.end(index).ok()?).ok()?;
+            PlaybackTimeRange::new(start, end).ok()
+        })
+        .collect()
 }
 
 impl Drop for WebPlayer {

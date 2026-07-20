@@ -12,7 +12,8 @@
 - **Recording:** microphone permissions, capture lifecycle, elapsed time, peaks, and live analysis.
 - **Playback:** Audio Data and ordered URL-addressable Playback Source alternatives,
   eager or on-play loading, playback lifecycle, stop/reset, whole-source repeat,
-  seeking, skipping, and playback rate.
+  network and readiness observations, buffered and seekable ranges, seeking,
+  skipping, and playback rate.
 - **Audio input devices:** enumeration, selection, permission requests, and device-change handling.
 - **Analysis:** bounded reactive snapshots, interpretable waveform and spectrum
   data, RMS levels, peak reduction, and PCM range trimming.
@@ -294,11 +295,22 @@ revoke an application-supplied URL, including an application-owned `blob:` URL.
 
 For custom controls, `use_audio_player` exposes a `PlaybackSnapshot` through
 `controller.snapshot()`. Source lifecycle, transport, readiness, and recoverable
-play failure are independent facets. URL selection and coarse terminal source
-failure are separately available through `selected_alternative` and
-`source_failure`. A play request remains `PlayPending` until the browser confirms
-`Playing`, and an interaction-required rejection leaves the current source
-usable for retry.
+play failure are independent facets. `network` separately reports inactive,
+unknown, loading, idle, or stalled activity, so playing transport may coexist
+with waiting readiness and stalled network activity. URL selection and coarse
+terminal source failure are separately available through `selected_alternative`
+and `source_failure`. A play request remains `PlayPending` until the browser
+confirms `Playing`, and an interaction-required rejection leaves the current
+source usable for retry. That recoverable failure clears on retry, confirmed
+play, source replacement, unload, or terminal source failure.
+
+`PlaybackSnapshot::buffered` and `seekable` are immutable, sorted source-time
+range snapshots for the current source attempt. Overlapping or touching ranges
+are merged, but later snapshots may be empty or smaller. Treat both collections
+as UI guidance: buffered time is not byte-transfer progress, and a seekable
+observation does not guarantee that the same seek will remain available later.
+Replacement, fallback, unload, and terminal failure clear the observations, and
+late events from an older source attempt cannot republish them.
 
 Calling `controller.stop()` atomically pauses Playback, resets position to zero,
 invalidates an outstanding play request, and returns a loaded source to
@@ -329,8 +341,8 @@ The same Controller can drive independently arranged `PlaybackSeekSlider`,
 cycle are configurable. Mute and repeat use stable labels and native pressed
 state. The seek and audibility sliders expose meaningful value text, which can
 be replaced with localized `value_text`. `PlaybackStatusAnnouncer` is an optional
-polite live region for coarse lifecycle changes and never announces position or
-audibility changes.
+polite live region for coarse lifecycle, waiting, stalled, and recovery changes.
+It never announces position, range snapshots, or audibility changes.
 
 ## Waveform Data
 

@@ -11,9 +11,9 @@ use dioxus_audio::components::{
     PlaybackStatusAnnouncer, PlaybackStopButton, WaveformPreview,
 };
 use dioxus_audio::playback::{
-    PlaybackLoadingPolicy, PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure,
-    PlaybackSourceFailureKind, PlaybackSourceLifecycle, PlaybackStatus, PlaybackTransport,
-    use_audio_player,
+    PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackSource, PlaybackSourceAlternative,
+    PlaybackSourceFailure, PlaybackSourceFailureKind, PlaybackSourceLifecycle, PlaybackStatus,
+    PlaybackTimeRange, PlaybackTransport, use_audio_player,
 };
 
 /// Lazily generate a two-second WAV tone when the player asks for its bytes.
@@ -170,6 +170,9 @@ pub fn UrlPlaybackExample() -> Element {
                 "data-source": source_lifecycle_name(&snapshot.source),
                 "data-transport": transport_name(snapshot.transport),
                 "data-readiness": format!("{:?}", snapshot.readiness).to_ascii_lowercase(),
+                "data-network": network_activity_name(snapshot.network),
+                "data-buffered": format_time_ranges(&snapshot.buffered),
+                "data-seekable": format_time_ranges(&snapshot.seekable),
                 "data-selected-alternative": selected_url,
                 "data-selected-media-type": selected_media_type,
                 "data-source-failure": source_failure_name(snapshot.source_failure.as_ref()),
@@ -281,6 +284,31 @@ fn transport_name(transport: PlaybackTransport) -> &'static str {
         PlaybackTransport::Ended => "ended",
         _ => "unknown",
     }
+}
+
+fn network_activity_name(activity: PlaybackNetworkActivity) -> &'static str {
+    match activity {
+        PlaybackNetworkActivity::Inactive => "inactive",
+        PlaybackNetworkActivity::Unknown => "unknown",
+        PlaybackNetworkActivity::Loading => "loading",
+        PlaybackNetworkActivity::Idle => "idle",
+        PlaybackNetworkActivity::Stalled => "stalled",
+        _ => "unknown",
+    }
+}
+
+fn format_time_ranges(ranges: &[PlaybackTimeRange]) -> String {
+    ranges
+        .iter()
+        .map(|range| {
+            format!(
+                "{}-{}",
+                range.start().as_secs_f64(),
+                range.end().as_secs_f64()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn source_failure_name(failure: Option<&PlaybackSourceFailure>) -> &'static str {

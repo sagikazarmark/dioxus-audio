@@ -9,6 +9,11 @@ type PlaybackTestWindow = typeof globalThis & {
   pendingPlaybackElement?: HTMLMediaElement;
   rejectPendingPlayback?: () => void;
   resolvePendingPlayback?: () => void;
+  setPlaybackRanges?: (
+    element: HTMLMediaElement,
+    buffered: [number, number][],
+    seekable: [number, number][],
+  ) => void;
 };
 
 async function holdAlternativeLoads(
@@ -205,12 +210,282 @@ test("URL alternatives skip, fall back, select, and fail terminally", async ({
   }, second);
   await expect(state).toHaveAttribute("data-source", "failed");
   await expect(state).toHaveAttribute("data-source-failure", "decode");
+  await expect(state).toHaveAttribute("data-network", "inactive");
+  await expect(state).toHaveAttribute("data-buffered", "");
+  await expect(state).toHaveAttribute("data-seekable", "");
   await expect(state).toHaveAttribute("data-selected-alternative", selectedUrl);
   expect(
     await page.evaluate(
       () => (window as PlaybackTestWindow).heldPlaybackElements?.length,
     ),
   ).toBe(2);
+  await first.dispose();
+  await second.dispose();
+});
+
+test("network and range observations stay scoped to the current URL attempt", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback-source", "Load local and remote media by URL");
+  await holdAlternativeLoads(page, "probably");
+  await page.evaluate(() => {
+    HTMLMediaElement.prototype.play = function () {
+      (window as PlaybackTestWindow).pendingPlaybackElement = this;
+      return Promise.resolve();
+    };
+    (window as PlaybackTestWindow).setPlaybackRanges = (
+      element,
+      buffered,
+      seekable,
+    ) => {
+      const timeRanges = (ranges: [number, number][]) => ({
+        length: ranges.length,
+        start: (index: number) => ranges[index][0],
+        end: (index: number) => ranges[index][1],
+      });
+      Object.defineProperties(element, {
+        buffered: { configurable: true, get: () => timeRanges(buffered) },
+        seekable: { configurable: true, get: () => timeRanges(seekable) },
+      });
+    };
+  });
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  const status = example.getByRole("status");
+  await example.getByRole("button", { name: "Load URL alternatives" }).click();
+  await expect(state).toHaveAttribute("data-source", "loading");
+
+  const first = await page.evaluateHandle(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[0],
+  );
+  await page.evaluate((element) => {
+    (window as PlaybackTestWindow).setPlaybackRanges?.(
+      element,
+      [[0, 8]],
+      [[0, 12]],
+    );
+    Object.defineProperty(element, "networkState", {
+      configurable: true,
+      value: 2,
+    });
+    element.dispatchEvent(new Event("progress"));
+  }, first);
+  await expect(state).toHaveAttribute("data-network", "loading");
+  await expect(state).toHaveAttribute("data-buffered", "0-8");
+  await expect(state).toHaveAttribute("data-seekable", "0-12");
+
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "error", {
+      configurable: true,
+      value: { code: 2 },
+    });
+    element.dispatchEvent(new Event("error"));
+  }, first);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as PlaybackTestWindow).heldPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBe(2);
+  await expect(state).toHaveAttribute("data-buffered", "");
+  await expect(state).toHaveAttribute("data-seekable", "");
+
+  await page.evaluate((element) => {
+    (window as PlaybackTestWindow).setPlaybackRanges?.(
+      element,
+      [[90, 100]],
+      [[90, 100]],
+    );
+    element.dispatchEvent(new Event("progress"));
+    element.dispatchEvent(new Event("stalled"));
+  }, first);
+  await expect(state).toHaveAttribute("data-buffered", "");
+  await expect(state).toHaveAttribute("data-network", "unknown");
+
+  const second = await page.evaluateHandle(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[1],
+  );
+  await page.evaluate((element) => {
+    element.dispatchEvent(new Event("canplay"));
+  }, second);
+  await example
+    .getByRole("button", { name: "Play URL Playback Source" })
+    .click();
+  await page.evaluate((element) => {
+    Object.defineProperties(element, {
+      paused: { configurable: true, value: false },
+      ended: { configurable: true, value: false },
+      readyState: { configurable: true, value: 2 },
+      networkState: { configurable: true, value: 2 },
+    });
+    (window as PlaybackTestWindow).setPlaybackRanges?.(
+      element,
+      [
+        [5, 10],
+        [0, 6],
+        [15, 20],
+      ],
+      [[0, 30]],
+    );
+    element.dispatchEvent(new Event("playing"));
+    element.dispatchEvent(new Event("progress"));
+    element.dispatchEvent(new Event("waiting"));
+    element.dispatchEvent(new Event("stalled"));
+  }, second);
+
+  await expect(state).toHaveAttribute("data-transport", "playing");
+  await expect(state).toHaveAttribute("data-readiness", "waiting");
+  await expect(state).toHaveAttribute("data-network", "stalled");
+  await expect(state).toHaveAttribute("data-buffered", "0-10,15-20");
+  await expect(state).toHaveAttribute("data-seekable", "0-30");
+  await expect(status).toHaveText("Audio loading stalled");
+
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "networkState", {
+      configurable: true,
+      value: 1,
+    });
+    (window as PlaybackTestWindow).setPlaybackRanges?.(element, [[2, 3]], []);
+    element.dispatchEvent(new Event("progress"));
+  }, second);
+  await expect(state).toHaveAttribute("data-network", "idle");
+  await expect(state).toHaveAttribute("data-buffered", "2-3");
+  await expect(state).toHaveAttribute("data-seekable", "");
+  await expect(status).toHaveText("Audio waiting for media");
+
+  await example
+    .getByRole("button", { name: "Replace URL Playback Source" })
+    .click();
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-buffered", "");
+  await page.evaluate((element) => {
+    (window as PlaybackTestWindow).setPlaybackRanges?.(
+      element,
+      [[40, 50]],
+      [[40, 50]],
+    );
+    element.dispatchEvent(new Event("progress"));
+    element.dispatchEvent(new Event("stalled"));
+  }, second);
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-buffered", "");
+  await expect(state).not.toHaveAttribute("data-network", "stalled");
+
+  const replacement = await page.evaluateHandle(() => {
+    const elements = (window as PlaybackTestWindow).heldPlaybackElements ?? [];
+    return elements[elements.length - 1];
+  });
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "networkState", {
+      configurable: true,
+      value: 2,
+    });
+    (window as PlaybackTestWindow).setPlaybackRanges?.(
+      element,
+      [[0, 4]],
+      [[0, 8]],
+    );
+    element.dispatchEvent(new Event("progress"));
+  }, replacement);
+  await expect(state).toHaveAttribute("data-network", "loading");
+  await expect(state).toHaveAttribute("data-buffered", "0-4");
+
+  await example
+    .getByRole("button", { name: "Unload URL Playback Source" })
+    .click();
+  await expect(state).toHaveAttribute("data-source", "empty");
+  await expect(state).toHaveAttribute("data-network", "inactive");
+  await expect(state).toHaveAttribute("data-buffered", "");
+  await expect(state).toHaveAttribute("data-seekable", "");
+  await page.evaluate((element) => {
+    (window as PlaybackTestWindow).setPlaybackRanges?.(
+      element,
+      [[30, 40]],
+      [[30, 40]],
+    );
+    element.dispatchEvent(new Event("progress"));
+    element.dispatchEvent(new Event("stalled"));
+  }, replacement);
+  await expect(state).toHaveAttribute("data-source", "empty");
+  await expect(state).toHaveAttribute("data-network", "inactive");
+  await expect(state).toHaveAttribute("data-buffered", "");
+
+  await first.dispose();
+  await second.dispose();
+  await replacement.dispose();
+});
+
+test("interaction-required failure survives automatic URL fallback", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback-source", "Load local and remote media by URL");
+  await holdAlternativeLoads(page, "probably");
+  await page.evaluate(() => {
+    HTMLMediaElement.prototype.play = function () {
+      (window as PlaybackTestWindow).pendingPlaybackElement = this;
+      return new Promise((_, reject) => {
+        (window as PlaybackTestWindow).rejectPendingPlayback = () =>
+          reject(new DOMException("Playback blocked by test", "NotAllowedError"));
+      });
+    };
+  });
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  const status = example.getByRole("status");
+  await example.getByRole("button", { name: "Load URL alternatives" }).click();
+  await example
+    .getByRole("button", { name: "Play URL Playback Source" })
+    .click();
+  await page.evaluate(() => {
+    (window as PlaybackTestWindow).rejectPendingPlayback?.();
+  });
+  await expect(state).toHaveAttribute("data-play-failure", "present");
+  await expect(status).toHaveText("Playback needs interaction");
+
+  const first = await page.evaluateHandle(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[0],
+  );
+  await page.evaluate((element) => {
+    Object.defineProperty(element, "error", {
+      configurable: true,
+      value: { code: 2 },
+    });
+    element.dispatchEvent(new Event("error"));
+  }, first);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as PlaybackTestWindow).heldPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBe(2);
+  await expect(state).toHaveAttribute("data-source", "loading");
+  await expect(state).toHaveAttribute("data-play-failure", "present");
+  await expect(status).toHaveText("Playback needs interaction");
+
+  const second = await page.evaluateHandle(
+    () => (window as PlaybackTestWindow).heldPlaybackElements?.[1],
+  );
+  await page.evaluate((element) => element.dispatchEvent(new Event("canplay")), second);
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute("data-play-failure", "present");
+
+  await page.evaluate(() => {
+    HTMLMediaElement.prototype.play = function () {
+      return Promise.resolve();
+    };
+  });
+  await example
+    .getByRole("button", { name: "Play URL Playback Source" })
+    .click();
+  await expect(state).toHaveAttribute("data-play-failure", "none");
+  await expect(state).toHaveAttribute("data-transport", "playing");
+
   await first.dispose();
   await second.dispose();
 });

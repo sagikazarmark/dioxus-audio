@@ -249,6 +249,9 @@ fn player_controls_have_explicit_accessible_names() {
     assert!(html.contains("data-source=\"empty\""));
     assert!(html.contains("data-transport=\"idle\""));
     assert!(html.contains("data-readiness=\"unavailable\""));
+    assert!(html.contains("data-network=\"inactive\""));
+    assert!(html.contains("data-buffered=\"\""));
+    assert!(html.contains("data-seekable=\"\""));
     assert!(html.contains("data-source-failure=\"none\""));
     assert!(html.contains("data-play-failure=\"none\""));
     assert!(html.contains("data-repeat=\"false\""));

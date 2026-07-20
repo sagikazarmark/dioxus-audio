@@ -188,6 +188,53 @@ pub enum PlaybackReadiness {
     Waiting,
 }
 
+/// Coarse network activity for the current Playback Source attempt.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackNetworkActivity {
+    /// No URL-addressable Playback Source is attached.
+    #[default]
+    Inactive,
+    /// A URL-addressable Playback Source is attached but has no reported activity yet.
+    Unknown,
+    /// The browser reports that it is acquiring media data.
+    Loading,
+    /// The browser is not currently acquiring media data.
+    Idle,
+    /// Media acquisition has stopped unexpectedly without becoming a terminal failure.
+    Stalled,
+}
+
+/// One immutable half-open source-time observation.
+///
+/// Buffered and seekable ranges are UI guidance from the browser. They may
+/// disappear or shrink and do not guarantee that a future seek will succeed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlaybackTimeRange {
+    start: Duration,
+    end: Duration,
+}
+
+impl PlaybackTimeRange {
+    pub fn new(start: Duration, end: Duration) -> Result<Self, PlaybackCommandError> {
+        if end <= start {
+            return Err(PlaybackCommandError(
+                "Playback time range end must be after its start",
+            ));
+        }
+
+        Ok(Self { start, end })
+    }
+
+    pub fn start(self) -> Duration {
+        self.start
+    }
+
+    pub fn end(self) -> Duration {
+        self.end
+    }
+}
+
 /// A portable terminal failure of the current Playback Source.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -321,6 +368,12 @@ pub struct PlaybackSnapshot {
     pub source: PlaybackSourceLifecycle,
     pub transport: PlaybackTransport,
     pub readiness: PlaybackReadiness,
+    /// Network activity observed independently from readiness and transport.
+    pub network: PlaybackNetworkActivity,
+    /// Normalized buffered observations for the current source attempt.
+    pub buffered: Arc<[PlaybackTimeRange]>,
+    /// Normalized seekable observations for the current source attempt.
+    pub seekable: Arc<[PlaybackTimeRange]>,
     /// The selected URL alternative, if the current source is URL-addressable.
     pub selected_alternative: Option<PlaybackSourceAlternative>,
     /// A terminal failure, separate from recoverable play-policy rejection.
@@ -344,6 +397,9 @@ impl Default for PlaybackSnapshot {
             source: PlaybackSourceLifecycle::Empty,
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::Unavailable,
+            network: PlaybackNetworkActivity::Inactive,
+            buffered: Arc::from([]),
+            seekable: Arc::from([]),
             selected_alternative: None,
             source_failure: None,
             alternative_failures: Arc::from([]),
@@ -401,6 +457,10 @@ impl PlaybackLifecycle {
 
     pub fn readiness(&self) -> PlaybackReadiness {
         self.snapshot.readiness
+    }
+
+    pub fn network_activity(&self) -> PlaybackNetworkActivity {
+        self.snapshot.network
     }
 
     pub fn play_failure(&self) -> Option<&PlaybackPlayFailure> {
@@ -465,6 +525,13 @@ impl PlaybackLifecycle {
         self.snapshot.selected_alternative = None;
         self.clear_source_failures();
         self.snapshot.play_failure = None;
+        self.clear_attempt_observations();
+    }
+
+    fn clear_attempt_observations(&mut self) {
+        self.snapshot.network = PlaybackNetworkActivity::Inactive;
+        self.snapshot.buffered = Arc::from([]);
+        self.snapshot.seekable = Arc::from([]);
     }
 
     pub fn loading(&mut self) {
@@ -502,7 +569,20 @@ impl PlaybackLifecycle {
             self.status = PlaybackStatus::Loading;
             self.snapshot.readiness = PlaybackReadiness::LoadingMetadata;
             self.clear_source_failures();
-            self.snapshot.play_failure = None;
+            self.clear_attempt_observations();
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    fn source_attempt_started(&mut self, url_addressable: bool) {
+        if self.snapshot.source == PlaybackSourceLifecycle::Loading {
+            self.snapshot.network = if url_addressable {
+                PlaybackNetworkActivity::Unknown
+            } else {
+                PlaybackNetworkActivity::Inactive
+            };
+            self.snapshot.buffered = Arc::from([]);
+            self.snapshot.seekable = Arc::from([]);
         }
     }
 
@@ -576,6 +656,33 @@ impl PlaybackLifecycle {
     pub fn playable(&mut self) {
         if matches!(self.snapshot.source, PlaybackSourceLifecycle::Playable) {
             self.snapshot.readiness = PlaybackReadiness::Playable;
+        }
+    }
+
+    pub fn network_observed(&mut self, activity: PlaybackNetworkActivity) {
+        if matches!(
+            self.snapshot.source,
+            PlaybackSourceLifecycle::Loading | PlaybackSourceLifecycle::Playable
+        ) {
+            self.snapshot.network = activity;
+        }
+    }
+
+    /// Replace buffered and seekable observations for the current source attempt.
+    ///
+    /// Ranges are sorted and overlapping or touching ranges are merged. A later
+    /// observation replaces the whole snapshot, so either collection may shrink.
+    pub fn ranges_changed(
+        &mut self,
+        buffered: impl IntoIterator<Item = PlaybackTimeRange>,
+        seekable: impl IntoIterator<Item = PlaybackTimeRange>,
+    ) {
+        if matches!(
+            self.snapshot.source,
+            PlaybackSourceLifecycle::Loading | PlaybackSourceLifecycle::Playable
+        ) {
+            self.snapshot.buffered = normalize_time_ranges(buffered);
+            self.snapshot.seekable = normalize_time_ranges(seekable);
         }
     }
 
@@ -665,6 +772,7 @@ impl PlaybackLifecycle {
         self.snapshot.source_failure = Some(failure);
         self.snapshot.alternative_failures = Arc::from([]);
         self.snapshot.play_failure = None;
+        self.clear_attempt_observations();
     }
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -684,6 +792,25 @@ impl PlaybackLifecycle {
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
         self.clear_source_observations();
     }
+}
+
+fn normalize_time_ranges(
+    ranges: impl IntoIterator<Item = PlaybackTimeRange>,
+) -> Arc<[PlaybackTimeRange]> {
+    let mut ranges: Vec<_> = ranges.into_iter().collect();
+    ranges.sort_unstable_by_key(|range| range.start);
+
+    let mut normalized: Vec<PlaybackTimeRange> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(last) = normalized.last_mut()
+            && range.start <= last.end
+        {
+            last.end = last.end.max(range.end);
+        } else {
+            normalized.push(range);
+        }
+    }
+    normalized.into()
 }
 
 /// Clamp a requested playback position to a usable finite timeline.
@@ -836,6 +963,9 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
             source: PlaybackSourceLifecycle::Failed,
             transport: PlaybackTransport::Idle,
             readiness: PlaybackReadiness::Unavailable,
+            network: PlaybackNetworkActivity::Inactive,
+            buffered: Arc::from([]),
+            seekable: Arc::from([]),
             selected_alternative: None,
             source_failure: Some(PlaybackSourceFailure::Unsupported(error)),
             alternative_failures: Arc::from([]),

@@ -6,9 +6,10 @@ use dioxus_icons::lucide::{Pause, Play, Repeat2, RotateCcw, RotateCw, Square, Vo
 use super::AudioScrubber;
 use crate::AudioErrorKind;
 use crate::playback::{
-    AudioPlayerController, PlaybackAudibilityCapability, PlaybackPlayFailure, PlaybackReadiness,
-    PlaybackSource, PlaybackSourceFailure, PlaybackSourceLifecycle, PlaybackStatus,
-    PlaybackTransport, use_audio_player,
+    AudioPlayerController, PlaybackAudibilityCapability, PlaybackNetworkActivity,
+    PlaybackPlayFailure, PlaybackReadiness, PlaybackSource, PlaybackSourceFailure,
+    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange, PlaybackTransport,
+    use_audio_player,
 };
 
 /// Localizable messages emitted by [`PlaybackStatusAnnouncer`].
@@ -22,6 +23,9 @@ pub struct PlaybackAnnouncementLabels {
     pub playing: String,
     pub paused: String,
     pub ended: String,
+    pub waiting: String,
+    pub stalled: String,
+    pub interaction_required: String,
     pub failed: String,
 }
 
@@ -36,6 +40,9 @@ impl Default for PlaybackAnnouncementLabels {
             playing: "Audio playing".to_string(),
             paused: "Audio paused".to_string(),
             ended: "Playback ended".to_string(),
+            waiting: "Audio waiting for media".to_string(),
+            stalled: "Audio loading stalled".to_string(),
+            interaction_required: "Playback needs interaction".to_string(),
             failed: "Playback failed".to_string(),
         }
     }
@@ -51,6 +58,17 @@ pub fn PlaybackStatusAnnouncer(
     let snapshot = controller.snapshot()();
     let message = if snapshot.source == PlaybackSourceLifecycle::Dormant {
         labels.dormant.as_str()
+    } else if snapshot.source_failure.is_some() {
+        labels.failed.as_str()
+    } else if matches!(
+        snapshot.play_failure,
+        Some(PlaybackPlayFailure::InteractionRequired(_))
+    ) {
+        labels.interaction_required.as_str()
+    } else if snapshot.network == PlaybackNetworkActivity::Stalled {
+        labels.stalled.as_str()
+    } else if snapshot.readiness == PlaybackReadiness::Waiting {
+        labels.waiting.as_str()
     } else if snapshot.transport == PlaybackTransport::PlayPending {
         labels.starting.as_str()
     } else {
@@ -393,6 +411,9 @@ pub fn AudioPlayer(
             "data-source": source_lifecycle_name(&snapshot.source),
             "data-transport": transport_state_name(snapshot.transport),
             "data-readiness": readiness_state_name(snapshot.readiness),
+            "data-network": network_activity_name(snapshot.network),
+            "data-buffered": format_time_ranges(&snapshot.buffered),
+            "data-seekable": format_time_ranges(&snapshot.seekable),
             "data-source-failure": source_failure_name(snapshot.source_failure.as_ref()),
             "data-play-failure": play_failure_name(snapshot.play_failure.as_ref()),
             "data-repeat": if snapshot.repeat { "true" } else { "false" },
@@ -496,6 +517,30 @@ fn play_failure_name(failure: Option<&PlaybackPlayFailure>) -> &'static str {
         Some(PlaybackPlayFailure::InteractionRequired(_)) => "interaction-required",
         Some(PlaybackPlayFailure::Unknown(_)) => "unknown",
     }
+}
+
+fn network_activity_name(activity: PlaybackNetworkActivity) -> &'static str {
+    match activity {
+        PlaybackNetworkActivity::Inactive => "inactive",
+        PlaybackNetworkActivity::Unknown => "unknown",
+        PlaybackNetworkActivity::Loading => "loading",
+        PlaybackNetworkActivity::Idle => "idle",
+        PlaybackNetworkActivity::Stalled => "stalled",
+    }
+}
+
+fn format_time_ranges(ranges: &[PlaybackTimeRange]) -> String {
+    ranges
+        .iter()
+        .map(|range| {
+            format!(
+                "{}-{}",
+                range.start().as_secs_f64(),
+                range.end().as_secs_f64()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn source_failure_name(failure: Option<&PlaybackSourceFailure>) -> &'static str {

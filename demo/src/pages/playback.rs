@@ -33,13 +33,13 @@ pub fn PlaybackSource() -> Element {
         PageHeader {
             eyebrow: "Playback Source",
             title: "Load local and remote media by URL",
-            intro: "Provide one URL or ordered typed alternatives, choose eager acquisition or genuinely dormant on-play loading, and retain authoritative replace and unload behavior.",
+            intro: "Provide one URL or ordered typed alternatives, choose eager acquisition or genuinely dormant on-play loading, and observe waiting, stalled, buffered, and seekable state without treating media time as byte progress.",
         }
         ExampleSection {
             title: "URL Playback Source",
             layout: ExampleLayout::Columns,
             intro: rsx! {
-                "The application owns every URL while Playback skips definitely unsupported media types, selects the first playable alternative, and scopes late outcomes to their source attempt."
+                "The application owns every URL while Playback skips definitely unsupported media types, selects the first playable alternative, and scopes network and range observations to that source attempt."
             },
             demo: rsx! { UrlPlaybackExample {} },
             code: rsx! {

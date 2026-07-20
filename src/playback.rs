@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use crate::AudioData;
 use crate::AudioError;
 use crate::AudioErrorKind;
+use crate::analysis::AudioAnalyser;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
@@ -328,6 +329,39 @@ pub enum PlaybackAudibilityCapability {
     Unavailable,
 }
 
+/// The state of an opt-in owner-lifetime Playback graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlaybackGraphState {
+    /// This Playback owner uses ordinary direct media playback.
+    NotRequested,
+    /// The graph is waiting for an eligible Audio Data source.
+    AwaitingSource,
+    /// The graph is being created or attached to the current source.
+    Preparing,
+    /// The graph exists but its audio context is suspended.
+    Suspended,
+    /// The graph is running with the current source attached.
+    Running,
+    /// Playback needs another user interaction before graph output can resume.
+    InteractionRequired,
+    /// Graph setup failed permanently for this owner; transport degraded to direct Playback.
+    Unavailable,
+}
+
+/// Immutable configuration for one Playback owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlaybackOptions {
+    graph_backed: bool,
+}
+
+impl PlaybackOptions {
+    /// Request owner-lifetime graph-backed Playback for eligible Audio Data sources.
+    pub const fn graph_backed() -> Self {
+        Self { graph_backed: true }
+    }
+}
+
 /// A finite normalized Playback audibility preference in the inclusive range `0.0..=1.0`.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct PlaybackAudibilityLevel(f64);
@@ -389,6 +423,8 @@ pub struct PlaybackSnapshot {
     pub audibility_level: PlaybackAudibilityLevel,
     /// The effectiveness contract for setting [`Self::audibility_level`].
     pub audibility_capability: PlaybackAudibilityCapability,
+    /// Owner-lifetime graph state, independent from source and transport state.
+    pub graph: PlaybackGraphState,
 }
 
 impl Default for PlaybackSnapshot {
@@ -408,6 +444,7 @@ impl Default for PlaybackSnapshot {
             muted: false,
             audibility_level: PlaybackAudibilityLevel::FULL,
             audibility_capability: PlaybackAudibilityCapability::BestEffortMediaElement,
+            graph: PlaybackGraphState::NotRequested,
         }
     }
 }
@@ -427,18 +464,29 @@ impl std::error::Error for PlaybackCommandError {}
 pub struct PlaybackLifecycle {
     status: PlaybackStatus,
     snapshot: PlaybackSnapshot,
+    graph_backed: bool,
 }
 
 impl Default for PlaybackLifecycle {
     fn default() -> Self {
-        Self {
-            status: PlaybackStatus::Empty,
-            snapshot: PlaybackSnapshot::default(),
-        }
+        Self::new(PlaybackOptions::default())
     }
 }
 
 impl PlaybackLifecycle {
+    pub fn new(options: PlaybackOptions) -> Self {
+        let mut snapshot = PlaybackSnapshot::default();
+        if options.graph_backed {
+            snapshot.graph = PlaybackGraphState::AwaitingSource;
+            snapshot.audibility_capability = PlaybackAudibilityCapability::EffectiveGraphGain;
+        }
+        Self {
+            status: PlaybackStatus::Empty,
+            snapshot,
+            graph_backed: options.graph_backed,
+        }
+    }
+
     pub fn status(&self) -> &PlaybackStatus {
         &self.status
     }
@@ -514,6 +562,89 @@ impl PlaybackLifecycle {
 
     pub fn audibility_capability(&self) -> PlaybackAudibilityCapability {
         self.snapshot.audibility_capability
+    }
+
+    pub fn graph_state(&self) -> PlaybackGraphState {
+        self.snapshot.graph
+    }
+
+    pub fn graph_preparing(&mut self) {
+        if self.graph_backed && self.snapshot.graph != PlaybackGraphState::Unavailable {
+            self.snapshot.graph = PlaybackGraphState::Preparing;
+            self.snapshot.audibility_capability = PlaybackAudibilityCapability::EffectiveGraphGain;
+        }
+    }
+
+    pub fn graph_awaiting_source(&mut self) {
+        if self.graph_backed && self.snapshot.graph != PlaybackGraphState::Unavailable {
+            self.snapshot.graph = PlaybackGraphState::AwaitingSource;
+            self.snapshot.audibility_capability = PlaybackAudibilityCapability::EffectiveGraphGain;
+        }
+    }
+
+    pub fn direct_audibility(&mut self) {
+        if self.snapshot.graph != PlaybackGraphState::Unavailable {
+            self.snapshot.audibility_capability =
+                PlaybackAudibilityCapability::BestEffortMediaElement;
+        }
+    }
+
+    pub fn graph_suspended(&mut self) {
+        if self.graph_backed
+            && !matches!(
+                self.snapshot.graph,
+                PlaybackGraphState::InteractionRequired | PlaybackGraphState::Unavailable
+            )
+        {
+            self.snapshot.graph = PlaybackGraphState::Suspended;
+        }
+    }
+
+    pub fn graph_running(&mut self) {
+        if self.graph_backed
+            && !matches!(
+                self.snapshot.graph,
+                PlaybackGraphState::InteractionRequired | PlaybackGraphState::Unavailable
+            )
+        {
+            self.snapshot.graph = PlaybackGraphState::Running;
+        }
+    }
+
+    pub fn graph_interaction_required(&mut self, error: AudioError) {
+        if !self.graph_backed
+            || self.snapshot.graph == PlaybackGraphState::Unavailable
+            || !matches!(
+                self.snapshot.source,
+                PlaybackSourceLifecycle::Loading | PlaybackSourceLifecycle::Playable
+            )
+            || !matches!(
+                self.snapshot.transport,
+                PlaybackTransport::PlayPending | PlaybackTransport::Playing
+            )
+        {
+            return;
+        }
+
+        self.status = PlaybackStatus::Failed(error.clone());
+        self.snapshot.transport = if self.snapshot.source == PlaybackSourceLifecycle::Loading {
+            PlaybackTransport::Idle
+        } else {
+            PlaybackTransport::Paused
+        };
+        if self.snapshot.readiness == PlaybackReadiness::Waiting {
+            self.snapshot.readiness = PlaybackReadiness::Metadata;
+        }
+        self.snapshot.play_failure = Some(PlaybackPlayFailure::InteractionRequired(error));
+        self.snapshot.graph = PlaybackGraphState::InteractionRequired;
+    }
+
+    pub fn graph_unavailable(&mut self) {
+        if self.graph_backed {
+            self.snapshot.graph = PlaybackGraphState::Unavailable;
+            self.snapshot.audibility_capability =
+                PlaybackAudibilityCapability::BestEffortMediaElement;
+        }
     }
 
     fn clear_source_failures(&mut self) {
@@ -623,6 +754,9 @@ impl PlaybackLifecycle {
             }
         }
         self.snapshot.play_failure = None;
+        if self.snapshot.graph == PlaybackGraphState::InteractionRequired {
+            self.snapshot.graph = PlaybackGraphState::Suspended;
+        }
         self.snapshot.transport = PlaybackTransport::PlayPending;
         Ok(())
     }
@@ -791,6 +925,9 @@ impl PlaybackLifecycle {
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
         self.clear_source_observations();
+        if self.graph_backed && self.snapshot.graph != PlaybackGraphState::Unavailable {
+            self.snapshot.graph = PlaybackGraphState::AwaitingSource;
+        }
     }
 }
 
@@ -828,6 +965,7 @@ pub struct AudioPlayerController {
     position: ReadSignal<Duration>,
     duration: ReadSignal<Duration>,
     rate: ReadSignal<f64>,
+    analyser: ReadSignal<Option<AudioAnalyser>>,
     play: Callback<(), Result<(), PlaybackCommandError>>,
     pause: Callback<(), Result<(), PlaybackCommandError>>,
     stop: Callback<(), Result<(), PlaybackCommandError>>,
@@ -858,6 +996,11 @@ impl AudioPlayerController {
 
     pub fn rate(self) -> ReadSignal<f64> {
         self.rate
+    }
+
+    /// The stable source-neutral Analyser for this graph-backed owner, once created.
+    pub fn analyser(self) -> ReadSignal<Option<AudioAnalyser>> {
+        self.analyser
     }
 
     pub fn repeat(self) -> bool {
@@ -934,25 +1077,39 @@ pub fn use_audio_player(
     source: ReadSignal<Option<PlaybackSource>>,
     initial_duration: Duration,
 ) -> AudioPlayerController {
+    use_audio_player_with_options(source, initial_duration, PlaybackOptions::default())
+}
+
+/// Create a Playback owner with immutable owner-level options.
+pub fn use_audio_player_with_options(
+    source: ReadSignal<Option<PlaybackSource>>,
+    initial_duration: Duration,
+    options: PlaybackOptions,
+) -> AudioPlayerController {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
-        web::use_web_audio_player(source, initial_duration)
+        web::use_web_audio_player(source, initial_duration, options)
     }
 
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     {
         let _ = source;
-        use_unsupported_audio_player(initial_duration)
+        use_unsupported_audio_player(initial_duration, options)
     }
 }
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerController {
+fn use_unsupported_audio_player(
+    initial_duration: Duration,
+    options: PlaybackOptions,
+) -> AudioPlayerController {
+    let initial_lifecycle = PlaybackLifecycle::new(options);
     let mut status = use_signal(|| PlaybackStatus::Empty);
-    let mut snapshot = use_signal(PlaybackSnapshot::default);
+    let mut snapshot = use_signal(|| initial_lifecycle.snapshot().clone());
     let position = use_signal(|| Duration::ZERO);
     let mut duration = use_signal(|| initial_duration);
     let rate = use_signal(|| 1.0);
+    let analyser = use_signal(|| None::<AudioAnalyser>);
     let initial_duration = use_memo(use_reactive!(|(initial_duration,)| initial_duration));
     use_effect(move || {
         duration.set(initial_duration());
@@ -974,6 +1131,11 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
             muted: preferences.muted,
             audibility_level: preferences.audibility_level,
             audibility_capability: PlaybackAudibilityCapability::Unavailable,
+            graph: if preferences.graph == PlaybackGraphState::NotRequested {
+                PlaybackGraphState::NotRequested
+            } else {
+                PlaybackGraphState::Unavailable
+            },
         });
     });
     let unsupported: Callback<(), Result<(), PlaybackCommandError>> =
@@ -998,6 +1160,7 @@ fn use_unsupported_audio_player(initial_duration: Duration) -> AudioPlayerContro
         position: position.into(),
         duration: duration.into(),
         rate: rate.into(),
+        analyser: analyser.into(),
         play: unsupported,
         pause: unsupported,
         stop: unsupported,

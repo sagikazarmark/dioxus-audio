@@ -5,15 +5,17 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use dioxus_audio::AudioData;
+use dioxus_audio::analysis::{AudioAnalyser, LiveAnalysisOptions, use_live_analysis};
 use dioxus_audio::components::{
     AudioPlayer, PlaybackAudibilitySlider, PlaybackMuteButton, PlaybackPlayPauseButton,
     PlaybackRateButton, PlaybackRepeatButton, PlaybackSeekSlider, PlaybackSkipButton,
     PlaybackStatusAnnouncer, PlaybackStopButton, WaveformPreview,
 };
 use dioxus_audio::playback::{
-    PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackSource, PlaybackSourceAlternative,
-    PlaybackSourceFailure, PlaybackSourceFailureKind, PlaybackSourceLifecycle, PlaybackStatus,
-    PlaybackTimeRange, PlaybackTransport, use_audio_player,
+    PlaybackGraphState, PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackOptions,
+    PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure, PlaybackSourceFailureKind,
+    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange, PlaybackTransport,
+    use_audio_player, use_audio_player_with_options,
 };
 
 /// Lazily generate a two-second WAV tone when the player asks for its bytes.
@@ -124,6 +126,160 @@ fn AudioDataPlaybackExample() -> Element {
                 href: "/playback-source",
                 "Show URL Playback Source"
             }
+        }
+    }
+}
+
+#[component]
+pub fn GraphPlaybackExample() -> Element {
+    let mut mounted = use_signal(|| true);
+    let mut retained_analyser = use_signal(|| None::<AudioAnalyser>);
+    let mut retained_available = use_signal(|| false);
+
+    rsx! {
+        section {
+            class: "graph-playback-example grid gap-3 rounded-2xl border border-base-300 bg-base-100 p-4",
+            role: "group",
+            aria_label: "Graph-backed Playback",
+            if mounted() {
+                GraphPlaybackOwner {
+                    on_analyser: move |analyser: AudioAnalyser| {
+                        retained_available.set(analyser.is_available());
+                        retained_analyser.set(Some(analyser));
+                    },
+                }
+            } else {
+                p { "Graph-backed Playback owner unmounted" }
+            }
+            output {
+                class: "retained-analyser-state",
+                "data-available": retained_available().to_string(),
+                if retained_available() {
+                    "Retained Analyser available"
+                } else {
+                    "Retained Analyser unavailable"
+                }
+            }
+            button {
+                class: "btn btn-ghost btn-xs justify-self-start",
+                r#type: "button",
+                disabled: retained_analyser.read().is_none(),
+                onclick: move |_| {
+                    retained_available.set(
+                        retained_analyser
+                            .read()
+                            .as_ref()
+                            .is_some_and(AudioAnalyser::is_available),
+                    );
+                },
+                "Check retained Analyser"
+            }
+            button {
+                class: "btn btn-ghost btn-xs justify-self-start",
+                r#type: "button",
+                disabled: !mounted(),
+                onclick: move |_| mounted.set(false),
+                "Unmount graph-backed Playback"
+            }
+        }
+    }
+}
+
+#[component]
+fn GraphPlaybackOwner(on_analyser: EventHandler<AudioAnalyser>) -> Element {
+    let mut source = use_signal(|| None::<PlaybackSource>);
+    let controller = use_audio_player_with_options(
+        source.into(),
+        Duration::from_secs(2),
+        PlaybackOptions::graph_backed(),
+    );
+    let analyser_signal = controller.analyser();
+    let analyser = analyser_signal();
+    let analyser_available = analyser.as_ref().is_some_and(AudioAnalyser::is_available);
+    let snapshot = controller.snapshot()();
+
+    use_effect(move || {
+        if let Some(analyser) = analyser_signal() {
+            on_analyser.call(analyser);
+        }
+    });
+
+    rsx! {
+        div {
+            class: "graph-playback-state",
+            "data-graph": graph_state_name(snapshot.graph),
+            "data-source": source_lifecycle_name(&snapshot.source),
+            "data-transport": transport_name(snapshot.transport),
+            "data-analyser": if analyser.is_some() { "present" } else { "absent" },
+            "data-analyser-available": analyser_available.to_string(),
+            "data-muted": snapshot.muted.to_string(),
+            "data-audibility-level": snapshot.audibility_level.value().to_string(),
+            "data-audibility-capability": format!("{:?}", snapshot.audibility_capability).to_ascii_lowercase(),
+        }
+        if analyser.is_some() {
+            GraphPlaybackAnalysis { analyser: analyser_signal }
+        } else {
+            output {
+                class: "graph-analysis-state",
+                "data-analysis": "unavailable",
+                "data-analysis-level": "0",
+            }
+        }
+        p { class: "text-sm text-base-content/60",
+            "Analysis observes Audio Data before effective graph gain, so mute and level changes do not erase its input."
+        }
+        div { class: "flex flex-wrap items-center gap-2",
+            button {
+                class: "btn btn-ghost btn-xs",
+                r#type: "button",
+                onclick: move |_| source.set(Some(sine_wave(440.0).into())),
+                "Load graph tone"
+            }
+            PlaybackPlayPauseButton {
+                controller,
+                play_label: "Play graph tone".to_string(),
+                pause_label: "Pause graph tone".to_string(),
+            }
+            PlaybackStopButton {
+                controller,
+                label: "Stop graph tone".to_string(),
+            }
+            PlaybackMuteButton {
+                controller,
+                label: "Mute graph tone".to_string(),
+            }
+            PlaybackAudibilitySlider {
+                controller,
+                label: "Graph tone audibility".to_string(),
+            }
+            button {
+                class: "btn btn-ghost btn-xs",
+                r#type: "button",
+                disabled: source.read().is_none(),
+                onclick: move |_| source.set(Some(sine_wave(660.0).into())),
+                "Replace graph tone"
+            }
+            button {
+                class: "btn btn-ghost btn-xs",
+                r#type: "button",
+                disabled: source.read().is_none(),
+                onclick: move |_| source.set(None),
+                "Unload graph tone"
+            }
+        }
+    }
+}
+
+#[component]
+fn GraphPlaybackAnalysis(analyser: ReadSignal<Option<AudioAnalyser>>) -> Element {
+    let analysis = use_live_analysis(analyser, LiveAnalysisOptions::default());
+    let level = analysis().map(|analysis| analysis.level());
+
+    rsx! {
+        output {
+            class: "graph-analysis-state",
+            "data-analysis": if level.is_some() { "available" } else { "unavailable" },
+            "data-analysis-level": level.unwrap_or_default().to_string(),
         }
     }
 }
@@ -293,6 +449,19 @@ fn network_activity_name(activity: PlaybackNetworkActivity) -> &'static str {
         PlaybackNetworkActivity::Loading => "loading",
         PlaybackNetworkActivity::Idle => "idle",
         PlaybackNetworkActivity::Stalled => "stalled",
+        _ => "unknown",
+    }
+}
+
+fn graph_state_name(state: PlaybackGraphState) -> &'static str {
+    match state {
+        PlaybackGraphState::NotRequested => "not-requested",
+        PlaybackGraphState::AwaitingSource => "awaiting-source",
+        PlaybackGraphState::Preparing => "preparing",
+        PlaybackGraphState::Suspended => "suspended",
+        PlaybackGraphState::Running => "running",
+        PlaybackGraphState::InteractionRequired => "interaction-required",
+        PlaybackGraphState::Unavailable => "unavailable",
         _ => "unknown",
     }
 }

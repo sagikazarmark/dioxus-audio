@@ -8,9 +8,13 @@ use gloo_timers::future::TimeoutFuture;
 use js_sys::Uint8Array;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use web_sys::{HtmlAudioElement, TimeRanges, Url};
+use web_sys::{
+    AudioContext, AudioContextState, GainNode, HtmlAudioElement, MediaElementAudioSourceNode,
+    TimeRanges, Url,
+};
 
 use super::*;
+use crate::analysis::AudioAnalyserControl;
 use crate::{AudioError, AudioErrorKind};
 
 const HAVE_FUTURE_DATA: u16 = 3;
@@ -20,13 +24,16 @@ const NETWORK_LOADING: u16 = 2;
 pub(super) fn use_web_audio_player(
     source: ReadSignal<Option<PlaybackSource>>,
     initial_duration: Duration,
+    options: PlaybackOptions,
 ) -> AudioPlayerController {
-    let status = use_signal(|| PlaybackStatus::Empty);
-    let snapshot = use_signal(PlaybackSnapshot::default);
+    let initial_lifecycle = PlaybackLifecycle::new(options);
+    let status = use_signal(|| initial_lifecycle.status().clone());
+    let snapshot = use_signal(|| initial_lifecycle.snapshot().clone());
     let mut position = use_signal(|| Duration::ZERO);
     let mut duration = use_signal(|| initial_duration);
     let mut rate = use_signal(|| 1.0_f64);
-    let runtime = use_hook(|| Rc::new(RefCell::new(PlayerRuntime::default())));
+    let analyser = use_signal(|| None::<crate::analysis::AudioAnalyser>);
+    let runtime = use_hook(|| Rc::new(RefCell::new(PlayerRuntime::new(options, analyser))));
     let dioxus_runtime = DioxusRuntime::current();
     let dioxus_scope = dioxus_runtime.current_scope_id();
     let initial_duration = use_memo(use_reactive!(|(initial_duration,)| initial_duration));
@@ -48,6 +55,10 @@ pub(super) fn use_web_audio_player(
                 runtime_mut.attempt_generation.advance();
                 runtime_mut.play_generation.advance();
                 let old_resource = runtime_mut.resource.take();
+                if let Some(graph) = runtime_mut.graph.as_ref() {
+                    graph.analyser.set_available(false);
+                }
+                runtime_mut.lifecycle.graph_awaiting_source();
                 runtime_mut.source = source.clone();
                 runtime_mut.next_alternative = 0;
                 runtime_mut.clear_alternative_failures();
@@ -243,9 +254,7 @@ pub(super) fn use_web_audio_player(
     let set_muted = use_callback(move |muted: bool| {
         let mut runtime = runtime_for_muted.borrow_mut();
         runtime.lifecycle.set_muted(muted);
-        if let Some(resource) = runtime.resource.as_ref() {
-            resource.element.set_muted(muted);
-        }
+        apply_audibility(&runtime);
         publish_lifecycle(&runtime.lifecycle, status, snapshot);
     });
 
@@ -259,10 +268,8 @@ pub(super) fn use_web_audio_player(
             {
                 return Err(PlaybackCommandError("audibility level is unavailable"));
             }
-            if let Some(resource) = runtime.resource.as_ref() {
-                resource.element.set_volume(level.value());
-            }
             runtime.lifecycle.set_validated_audibility_level(level);
+            apply_audibility(&runtime);
             publish_lifecycle(&runtime.lifecycle, status, snapshot);
             Ok(())
         });
@@ -273,6 +280,7 @@ pub(super) fn use_web_audio_player(
         position: position.into(),
         duration: duration.into(),
         rate: rate.into(),
+        analyser: analyser.into(),
         play,
         pause,
         stop,
@@ -322,6 +330,8 @@ struct PlayerRuntime {
     lifecycle: PlaybackLifecycle,
     source: Option<PlaybackSource>,
     resource: Option<WebPlayer>,
+    graph: Option<PlaybackGraph>,
+    analyser_signal: Signal<Option<crate::analysis::AudioAnalyser>>,
     generation: SourceGeneration,
     attempt_generation: AttemptGeneration,
     play_generation: PlayGeneration,
@@ -345,12 +355,84 @@ enum AlternativeFailureRetention {
     Retain,
 }
 
-impl Default for PlayerRuntime {
-    fn default() -> Self {
+struct PlaybackGraph {
+    context: AudioContext,
+    analyser: AudioAnalyserControl,
+    gain: GainNode,
+    _on_state_change: Closure<dyn FnMut()>,
+}
+
+impl PlaybackGraph {
+    fn new(
+        runtime: &Rc<RefCell<PlayerRuntime>>,
+        status: Signal<PlaybackStatus>,
+        snapshot: Signal<PlaybackSnapshot>,
+        dioxus_runtime: Rc<DioxusRuntime>,
+        dioxus_scope: ScopeId,
+    ) -> Result<(Self, crate::analysis::AudioAnalyser), AudioError> {
+        let context = AudioContext::new().map_err(playback_error)?;
+        let setup = (|| {
+            let analyser_node = context.create_analyser().map_err(playback_error)?;
+            let gain = context.create_gain().map_err(playback_error)?;
+            analyser_node
+                .connect_with_audio_node(&gain)
+                .map_err(playback_error)?;
+            gain.connect_with_audio_node(&context.destination())
+                .map_err(playback_error)?;
+            Ok::<_, AudioError>((analyser_node, gain))
+        })();
+        let (analyser_node, gain) = match setup {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                settle_audio_promise(context.close());
+                return Err(error);
+            }
+        };
+        let (analyser, handle) = AudioAnalyserControl::new(analyser_node, context.sample_rate());
+        let runtime = Rc::downgrade(runtime);
+        let dioxus_runtime_for_state = dioxus_runtime;
+        let on_state_change = Closure::wrap(Box::new(move || {
+            dioxus_runtime_for_state.in_scope(dioxus_scope, || {
+                if let Some(runtime) = runtime.upgrade() {
+                    reconcile_graph_state(&runtime, status, snapshot);
+                }
+            });
+        }) as Box<dyn FnMut()>);
+        context.set_onstatechange(Some(on_state_change.as_ref().unchecked_ref()));
+
+        Ok((
+            Self {
+                context,
+                analyser,
+                gain,
+                _on_state_change: on_state_change,
+            },
+            handle,
+        ))
+    }
+}
+
+impl Drop for PlaybackGraph {
+    fn drop(&mut self) {
+        self.analyser.set_available(false);
+        self.context.set_onstatechange(None);
+        let _ = self.analyser.node().disconnect();
+        let _ = self.gain.disconnect();
+        settle_audio_promise(self.context.close());
+    }
+}
+
+impl PlayerRuntime {
+    fn new(
+        options: PlaybackOptions,
+        analyser_signal: Signal<Option<crate::analysis::AudioAnalyser>>,
+    ) -> Self {
         Self {
-            lifecycle: PlaybackLifecycle::default(),
+            lifecycle: PlaybackLifecycle::new(options),
             source: None,
             resource: None,
+            graph: None,
+            analyser_signal,
             generation: SourceGeneration::default(),
             attempt_generation: AttemptGeneration::default(),
             play_generation: PlayGeneration::default(),
@@ -361,11 +443,16 @@ impl Default for PlayerRuntime {
             owner_active: true,
         }
     }
-}
 
-impl PlayerRuntime {
     fn is_current_source(&self, generation: SourceGeneration) -> bool {
         self.owner_active && self.generation == generation
+    }
+
+    fn graph_requested(&self) -> bool {
+        !matches!(
+            self.lifecycle.graph_state(),
+            PlaybackGraphState::NotRequested | PlaybackGraphState::Unavailable
+        )
     }
 
     fn source_attempt(&self) -> SourceAttempt {
@@ -452,9 +539,142 @@ impl PlayerRuntime {
         } else {
             self.play_generation.advance();
             self.clear_alternative_failures();
+            if let Some(graph) = self.graph.as_ref() {
+                graph.analyser.set_available(false);
+                self.lifecycle.graph_awaiting_source();
+            }
             self.lifecycle.source_failed(failure);
             SourceErrorAction::Terminal
         }
+    }
+}
+
+fn attach_graph_source(
+    runtime: &Rc<RefCell<PlayerRuntime>>,
+    element: &HtmlAudioElement,
+    status: Signal<PlaybackStatus>,
+    snapshot: Signal<PlaybackSnapshot>,
+    dioxus_runtime: Rc<DioxusRuntime>,
+    dioxus_scope: ScopeId,
+) -> Result<MediaElementAudioSourceNode, AudioError> {
+    if runtime.borrow().graph.is_none() {
+        let (graph, analyser) =
+            PlaybackGraph::new(runtime, status, snapshot, dioxus_runtime, dioxus_scope)?;
+        let mut analyser_signal = {
+            let mut runtime = runtime.borrow_mut();
+            runtime.graph = Some(graph);
+            runtime.analyser_signal
+        };
+        analyser_signal.set(Some(analyser));
+    }
+
+    let runtime_ref = runtime.borrow();
+    let graph = runtime_ref
+        .graph
+        .as_ref()
+        .expect("Playback graph was created before source attachment");
+    let source = graph
+        .context
+        .create_media_element_source(element)
+        .map_err(playback_error)?;
+    source
+        .connect_with_audio_node(graph.analyser.node())
+        .map_err(playback_error)?;
+    Ok(source)
+}
+
+fn reconcile_graph_state(
+    runtime: &Rc<RefCell<PlayerRuntime>>,
+    status: Signal<PlaybackStatus>,
+    snapshot: Signal<PlaybackSnapshot>,
+) {
+    let (state, attached, direct_routed, element) = {
+        let runtime = runtime.borrow();
+        let Some(graph) = runtime.graph.as_ref() else {
+            return;
+        };
+        (
+            graph.context.state(),
+            runtime
+                .resource
+                .as_ref()
+                .is_some_and(|resource| resource.graph_source.is_some()),
+            runtime
+                .resource
+                .as_ref()
+                .is_some_and(|resource| resource.graph_source.is_none()),
+            runtime
+                .resource
+                .as_ref()
+                .map(|resource| resource.element.clone()),
+        )
+    };
+
+    if state == AudioContextState::Closed {
+        degrade_graph(runtime, status, snapshot);
+        return;
+    }
+
+    let mut runtime_ref = runtime.borrow_mut();
+    let Some(graph) = runtime_ref.graph.as_ref() else {
+        return;
+    };
+    if state == AudioContextState::Running
+        && attached
+        && runtime_ref.lifecycle.graph_state() != PlaybackGraphState::InteractionRequired
+    {
+        graph.analyser.set_available(true);
+        runtime_ref.lifecycle.graph_running();
+    } else {
+        graph.analyser.set_available(false);
+        if attached {
+            if state == AudioContextState::Suspended
+                && runtime_ref.lifecycle.transport() == PlaybackTransport::Playing
+            {
+                if let Some(element) = element {
+                    let _ = element.pause();
+                }
+                runtime_ref.play_generation.advance();
+                runtime_ref
+                    .lifecycle
+                    .graph_interaction_required(AudioError::new(
+                        AudioErrorKind::PlaybackFailure,
+                        "Playback graph was interrupted and needs interaction",
+                    ));
+            } else {
+                runtime_ref.lifecycle.graph_suspended();
+            }
+        } else {
+            runtime_ref.lifecycle.graph_awaiting_source();
+            if direct_routed {
+                runtime_ref.lifecycle.direct_audibility();
+            }
+        }
+    }
+    publish_lifecycle(&runtime_ref.lifecycle, status, snapshot);
+}
+
+fn degrade_graph(
+    runtime: &Rc<RefCell<PlayerRuntime>>,
+    status: Signal<PlaybackStatus>,
+    snapshot: Signal<PlaybackSnapshot>,
+) {
+    let (graph, mut analyser_signal) = {
+        let mut runtime = runtime.borrow_mut();
+        let graph = runtime.graph.take();
+        runtime.lifecycle.graph_unavailable();
+        (graph, runtime.analyser_signal)
+    };
+    analyser_signal.set(None);
+    drop(graph);
+    publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
+}
+
+fn settle_audio_promise(result: Result<js_sys::Promise, JsValue>) {
+    if let Ok(promise) = result {
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        });
     }
 }
 
@@ -470,7 +690,7 @@ fn attach_current_source(
     dioxus_scope: ScopeId,
     rate: Signal<f64>,
 ) -> Result<(), PlaybackCommandError> {
-    let element = HtmlAudioElement::new().map_err(|value| {
+    let mut element = HtmlAudioElement::new().map_err(|value| {
         terminate_current_source(
             runtime,
             PlaybackSourceFailure::Unknown(playback_error(value)),
@@ -507,6 +727,41 @@ fn attach_current_source(
         ));
     };
 
+    let graph_source = if candidate.is_graph_eligible() && runtime.borrow().graph_requested() {
+        runtime.borrow_mut().lifecycle.graph_preparing();
+        publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
+        match attach_graph_source(
+            runtime,
+            &element,
+            status,
+            snapshot,
+            dioxus_runtime.clone(),
+            dioxus_scope,
+        ) {
+            Ok(source) => Some(source),
+            Err(_) => {
+                degrade_graph(runtime, status, snapshot);
+                element = HtmlAudioElement::new().map_err(|value| {
+                    terminate_current_source(
+                        runtime,
+                        PlaybackSourceFailure::Unknown(playback_error(value)),
+                        AlternativeFailureRetention::Discard,
+                        status,
+                        snapshot,
+                    );
+                    PlaybackCommandError("browser rejected the Playback Source")
+                })?;
+                None
+            }
+        }
+    } else {
+        if !candidate.is_graph_eligible() {
+            runtime.borrow_mut().lifecycle.direct_audibility();
+            publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
+        }
+        None
+    };
+
     let source_attempt = {
         let mut runtime = runtime.borrow_mut();
         runtime.advance_attempt();
@@ -528,6 +783,7 @@ fn attach_current_source(
         dioxus_runtime,
         dioxus_scope,
         rate,
+        graph_source,
     )
     .map_err(|error| {
         terminate_current_source(
@@ -540,11 +796,12 @@ fn attach_current_source(
         PlaybackCommandError("browser rejected the Playback Source")
     })?;
 
+    runtime.borrow_mut().resource = Some(resource);
     {
         let runtime_ref = runtime.borrow();
-        configure_resource(&resource, &runtime_ref.lifecycle, *rate.peek());
+        configure_resource(&runtime_ref, *rate.peek());
     }
-    runtime.borrow_mut().resource = Some(resource);
+    reconcile_graph_state(runtime, status, snapshot);
     if runtime.borrow().lifecycle.transport() == PlaybackTransport::PlayPending {
         play_current_resource(runtime, status, snapshot)?;
     }
@@ -556,18 +813,81 @@ fn play_current_resource(
     status: Signal<PlaybackStatus>,
     snapshot: Signal<PlaybackSnapshot>,
 ) -> Result<(), PlaybackCommandError> {
-    let (element, source_attempt, play_generation) = {
+    let (element, source_attempt, play_generation, graph_context) = {
         let runtime = runtime.borrow();
+        let resource = runtime
+            .resource
+            .as_ref()
+            .ok_or(PlaybackCommandError("audio is not loaded"))?;
         (
-            runtime
-                .resource
-                .as_ref()
-                .map(|resource| resource.element.clone())
-                .ok_or(PlaybackCommandError("audio is not loaded"))?,
+            resource.element.clone(),
             runtime.source_attempt(),
             runtime.play_generation,
+            resource
+                .graph_source
+                .as_ref()
+                .and_then(|_| runtime.graph.as_ref().map(|graph| graph.context.clone())),
         )
     };
+
+    if let Some(context) = graph_context {
+        let resume = context.resume();
+        let media_play = element.play();
+        let promise = match (resume, media_play) {
+            (Ok(resume), Ok(media_play)) => {
+                let promises = js_sys::Array::new();
+                promises.push(&resume);
+                promises.push(&media_play);
+                js_sys::Promise::all(&promises)
+            }
+            (Err(value), _) | (_, Err(value)) => {
+                reject_graph_activation(runtime, &element, value, status, snapshot);
+                return Err(PlaybackCommandError(
+                    "browser rejected graph-backed playback",
+                ));
+            }
+        };
+        let runtime = Rc::downgrade(runtime);
+        spawn(async move {
+            let outcome = wasm_bindgen_futures::JsFuture::from(promise).await;
+            let Some(runtime) = runtime.upgrade() else {
+                return;
+            };
+            let runtime_ref = runtime.borrow();
+            if !runtime_ref.is_current_attempt(source_attempt)
+                || runtime_ref.play_generation != play_generation
+            {
+                let should_pause = runtime_ref.is_current_attempt(source_attempt)
+                    && matches!(
+                        runtime_ref.lifecycle.transport(),
+                        PlaybackTransport::Idle | PlaybackTransport::Paused
+                    );
+                drop(runtime_ref);
+                if should_pause {
+                    let _ = element.pause();
+                }
+                return;
+            }
+            drop(runtime_ref);
+
+            if outcome.is_ok() && context.state() == AudioContextState::Running {
+                let mut runtime_ref = runtime.borrow_mut();
+                if let Some(graph) = runtime_ref.graph.as_ref() {
+                    graph.analyser.set_available(true);
+                }
+                runtime_ref.lifecycle.graph_running();
+                runtime_ref.lifecycle.playing();
+                publish_lifecycle(&runtime_ref.lifecycle, status, snapshot);
+            } else {
+                let value = outcome.err().unwrap_or_else(|| {
+                    JsValue::from_str("Playback graph did not enter the running state")
+                });
+                reject_graph_activation(&runtime, &element, value, status, snapshot);
+            }
+        });
+        return Ok(());
+    }
+
     let promise = match element.play() {
         Ok(promise) => promise,
         Err(value) => {
@@ -611,6 +931,24 @@ fn play_current_resource(
         publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
     });
     Ok(())
+}
+
+fn reject_graph_activation(
+    runtime: &Rc<RefCell<PlayerRuntime>>,
+    element: &HtmlAudioElement,
+    value: JsValue,
+    status: Signal<PlaybackStatus>,
+    snapshot: Signal<PlaybackSnapshot>,
+) {
+    let _ = element.pause();
+    let mut runtime = runtime.borrow_mut();
+    if let Some(graph) = runtime.graph.as_ref() {
+        graph.analyser.set_available(false);
+    }
+    runtime
+        .lifecycle
+        .graph_interaction_required(playback_error(value));
+    publish_lifecycle(&runtime.lifecycle, status, snapshot);
 }
 
 fn terminate_current_source(
@@ -720,7 +1058,7 @@ struct UnmountGuard(Weak<RefCell<PlayerRuntime>>);
 impl Drop for UnmountGuard {
     fn drop(&mut self) {
         if let Some(runtime) = self.0.upgrade() {
-            let resource = {
+            let (resource, graph) = {
                 let mut runtime = runtime.borrow_mut();
                 runtime.owner_active = false;
                 runtime.generation.advance();
@@ -728,19 +1066,22 @@ impl Drop for UnmountGuard {
                 runtime.play_generation.advance();
                 runtime.source = None;
                 runtime.clear_alternative_failures();
-                runtime.resource.take()
+                (runtime.resource.take(), runtime.graph.take())
             };
             drop(resource);
+            drop(graph);
         }
     }
 }
 
 struct WebPlayer {
     element: HtmlAudioElement,
+    graph_source: Option<MediaElementAudioSourceNode>,
     _object_url: Option<ObjectUrl>,
     listeners: Vec<EventListener>,
 }
 
+#[derive(Clone)]
 enum WebPlayerInput {
     AudioData(Arc<AudioData>),
     Url(PlaybackSourceAlternative),
@@ -749,6 +1090,10 @@ enum WebPlayerInput {
 impl WebPlayerInput {
     fn is_url_addressable(&self) -> bool {
         matches!(self, Self::Url(_))
+    }
+
+    fn is_graph_eligible(&self) -> bool {
+        matches!(self, Self::AudioData(_))
     }
 }
 
@@ -766,6 +1111,7 @@ impl WebPlayer {
         dioxus_runtime: Rc<DioxusRuntime>,
         dioxus_scope: ScopeId,
         rate: Signal<f64>,
+        graph_source: Option<MediaElementAudioSourceNode>,
     ) -> Result<Self, AudioError> {
         let (source_url, object_url, selected_alternative) = match source {
             WebPlayerInput::AudioData(source) => {
@@ -1065,6 +1411,7 @@ impl WebPlayer {
 
         let player = Self {
             element,
+            graph_source,
             _object_url: object_url,
             listeners,
         };
@@ -1139,6 +1486,9 @@ impl Drop for WebPlayer {
             remove_listener(&self.element, listener.name, &listener.callback);
         }
         let _ = self.element.pause();
+        if let Some(source) = self.graph_source.take() {
+            let _ = source.disconnect();
+        }
         let _ = self.element.remove_attribute("src");
         self.element.load();
     }
@@ -1155,13 +1505,36 @@ impl EventListener {
     }
 }
 
-fn configure_resource(resource: &WebPlayer, lifecycle: &PlaybackLifecycle, rate: f64) {
+fn configure_resource(runtime: &PlayerRuntime, rate: f64) {
+    let Some(resource) = runtime.resource.as_ref() else {
+        return;
+    };
     resource.element.set_playback_rate(rate);
-    resource.element.set_loop(lifecycle.repeat());
-    resource.element.set_muted(lifecycle.muted());
-    resource
-        .element
-        .set_volume(lifecycle.audibility_level().value());
+    resource.element.set_loop(runtime.lifecycle.repeat());
+    apply_audibility(runtime);
+}
+
+fn apply_audibility(runtime: &PlayerRuntime) {
+    let Some(resource) = runtime.resource.as_ref() else {
+        return;
+    };
+    if resource.graph_source.is_some() {
+        resource.element.set_muted(false);
+        resource.element.set_volume(1.0);
+        if let Some(graph) = runtime.graph.as_ref() {
+            let gain = if runtime.lifecycle.muted() {
+                0.0
+            } else {
+                runtime.lifecycle.audibility_level().value() as f32
+            };
+            graph.gain.gain().set_value(gain);
+        }
+    } else {
+        resource.element.set_muted(runtime.lifecycle.muted());
+        resource
+            .element
+            .set_volume(runtime.lifecycle.audibility_level().value());
+    }
 }
 
 fn media_source_failure(element: &HtmlAudioElement) -> PlaybackSourceFailure {

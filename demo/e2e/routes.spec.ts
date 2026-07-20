@@ -26,6 +26,14 @@ const documentedRoutes = [
     tabbed: false,
   },
   {
+    path: "/graph-playback",
+    heading: "Analyse audio before effective graph gain",
+    section: "Graph-backed Playback",
+    example: "Retained Analyser unavailable",
+    source: "pub fn GraphPlaybackExample",
+    tabbed: false,
+  },
+  {
     path: "/devices",
     heading: "Discover and select microphones",
     section: "use_audio_input_devices",

@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 use dioxus_code::{Code, code};
 
 use crate::components::{ExampleLayout, ExampleSection, InlineCode, PageHeader, snippet_theme};
-use crate::examples::playback::{PlaybackExample, UrlPlaybackExample};
+use crate::examples::playback::{GraphPlaybackExample, PlaybackExample, UrlPlaybackExample};
 
 #[component]
 pub fn Playback() -> Element {
@@ -20,6 +20,28 @@ pub fn Playback() -> Element {
                 " lets storage-backed applications fetch bytes on the first play instead of eagerly loading every recording."
             },
             demo: rsx! { PlaybackExample {} },
+            code: rsx! {
+                Code { src: code!("/src/examples/playback.rs"), theme: snippet_theme() }
+            },
+        }
+    }
+}
+
+#[component]
+pub fn GraphPlayback() -> Element {
+    rsx! {
+        PageHeader {
+            eyebrow: "Playback-backed Analysis",
+            title: "Analyse audio before effective graph gain",
+            intro: "Opt in once per Playback owner to retain a pre-gain Analyser and effective gain graph across eligible Audio Data replacement and unload.",
+        }
+        ExampleSection {
+            title: "Graph-backed Playback",
+            layout: ExampleLayout::Columns,
+            intro: rsx! {
+                "Activation coordinates the audio context and media element. Terminal graph setup failure degrades this owner to direct Playback without disabling ordinary transport."
+            },
+            demo: rsx! { GraphPlaybackExample {} },
             code: rsx! {
                 Code { src: code!("/src/examples/playback.rs"), theme: snippet_theme() }
             },

@@ -13,7 +13,7 @@
 - **Playback:** Audio Data and ordered URL-addressable Playback Source alternatives,
   eager or on-play loading, playback lifecycle, stop/reset, whole-source repeat,
   network and readiness observations, buffered and seekable ranges, seeking,
-  skipping, and playback rate.
+  skipping, playback rate, and opt-in pre-gain Analysis with effective graph gain.
 - **Audio input devices:** enumeration, selection, permission requests, and device-change handling.
 - **Analysis:** bounded reactive snapshots, interpretable waveform and spectrum
   data, RMS levels, peak reduction, and PCM range trimming.
@@ -128,7 +128,8 @@ successful Recording.
 
 Use `use_live_analysis` with an optional `AudioAnalyser` from any supported
 source. Recorder supplies one through `recorder.analyser()` while a Recording is
-active; future sources can provide the same source-neutral handle.
+active, and graph-backed Playback supplies the same source-neutral handle through
+`player.analyser()`.
 
 ```rust
 use dioxus_audio::analysis::{LiveAnalysisOptions, use_live_analysis};
@@ -153,6 +154,15 @@ has an independent schedule. Its snapshot becomes `None` when the Analyser is
 removed or replaced, stale work cannot publish into the replacement, polling
 stops on unmount, and analyser reads are suspended while the document is
 hidden.
+
+An `AudioAnalyser` is a weak owner handle: retaining it does not keep its audio
+graph alive. `is_available()`, `try_read()`, and `try_level()` report
+unavailability when its source is detached, its owner degrades, or its owner is
+cleaned up. Convenience `read()` and `level()` retain their empty/zero fallback;
+use the `try_` methods whenever valid silence must be distinguished from an
+unavailable source. Reactive Analysis clears its snapshot while a stable handle
+is unavailable and resumes when graph-backed Playback attaches another eligible
+source to that same Analyser.
 
 Time-domain values are byte-quantized amplitudes normalized to `-1.0..=1.0`.
 Frequency-domain values are byte-quantized magnitudes normalized to
@@ -333,6 +343,44 @@ element receives the value, but some platforms, notably iOS, may not apply it
 to perceived loudness. `EffectiveGraphGain` is reserved for graph-backed
 Playback; direct control does not claim that guarantee. Mute and all transport
 commands remain independent from level capability.
+
+For pre-gain Analysis and effective gain, create an immutable graph-backed owner:
+
+```rust
+use std::time::Duration;
+
+use dioxus::prelude::*;
+use dioxus_audio::playback::{
+    PlaybackOptions, PlaybackSource, use_audio_player_with_options,
+};
+
+let source = use_signal(|| None::<PlaybackSource>);
+let player = use_audio_player_with_options(
+    source.into(),
+    Duration::ZERO,
+    PlaybackOptions::graph_backed(),
+);
+let analyser = player.analyser();
+```
+
+The opt-in belongs to the Playback owner and cannot be switched reactively.
+The graph is created lazily when the first eligible Audio Data source is
+attached, then its context, pre-gain Analyser, and gain node persist across
+eligible replacement and unload. The graph state is orthogonal to source and
+transport state: it reports awaiting source, preparing, suspended, running,
+interaction required, or terminal unavailability. Direct Playback remains the
+default.
+
+A graph-backed play request invokes context resume and media play in the same
+activation turn and reports `Playing` only after both succeed. Rejection or a
+later context suspension pauses the media and reports an interaction-required
+failure that can be retried. Analysis observes the source before mute and level
+gain, so visualizations remain meaningful at zero output gain. A terminal setup
+failure invalidates Analysis, permanently changes that owner's level capability
+to `BestEffortMediaElement`, and continues with direct transport. URL sources
+currently take that direct route and report its best-effort capability; an
+eligible Audio Data replacement can use the retained graph unless the owner has
+terminally degraded.
 
 The same Controller can drive independently arranged `PlaybackSeekSlider`,
 `PlaybackSkipButton`, `PlaybackStopButton`, `PlaybackPlayPauseButton`,

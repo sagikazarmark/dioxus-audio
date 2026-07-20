@@ -13,7 +13,7 @@ use web_sys::{
 };
 
 use super::*;
-use crate::analysis::{AudioAnalyser, peak_amplitude};
+use crate::analysis::{AudioAnalyser, AudioAnalyserControl, peak_amplitude};
 use crate::devices::web::{audio_error_from_js, media_devices, stop_stream};
 use crate::{AudioData, AudioErrorKind};
 
@@ -337,7 +337,7 @@ struct WebSession {
     stream: MediaStream,
     context: AudioContext,
     _source: MediaStreamAudioSourceNode,
-    analyser: AudioAnalyser,
+    analyser: AudioAnalyserControl,
     chunks: Rc<RefCell<Vec<Blob>>>,
     _on_data: Closure<dyn FnMut(BlobEvent)>,
     _on_stop: Closure<dyn FnMut()>,
@@ -350,6 +350,7 @@ struct WebSession {
 
 impl Drop for WebSession {
     fn drop(&mut self) {
+        self.analyser.set_available(false);
         self.recorder.set_ondataavailable(None);
         self.recorder.set_onstop(None);
         self.recorder.set_onerror(None);
@@ -712,13 +713,15 @@ async fn start_session(
     }
     let media_type = recorder.mime_type();
     let (stream, context) = pending.into_parts();
-    let analyser = AudioAnalyser::new(analyser_node, context.sample_rate());
+    let (analyser_control, analyser) =
+        AudioAnalyserControl::new(analyser_node, context.sample_rate());
+    analyser_control.set_available(true);
     let session = WebSession {
         recorder,
         stream,
         context,
         _source: source,
-        analyser: analyser.clone(),
+        analyser: analyser_control,
         chunks,
         _on_data: on_data,
         _on_stop: on_stop,

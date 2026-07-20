@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use dioxus_audio::playback::{
-    PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackLifecycle,
-    PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackPlayFailure, PlaybackReadiness,
-    PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure, PlaybackSourceLifecycle,
-    PlaybackStatus, PlaybackTimeRange, PlaybackTransport, clamp_seek, use_audio_player,
+    PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackGraphState, PlaybackLifecycle,
+    PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackOptions, PlaybackPlayFailure,
+    PlaybackReadiness, PlaybackSource, PlaybackSourceAlternative, PlaybackSourceFailure,
+    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange, PlaybackTransport, clamp_seek,
+    use_audio_player, use_audio_player_with_options,
 };
 use dioxus_audio::{AudioData, AudioError, AudioErrorKind};
 
@@ -54,6 +55,165 @@ fn audio_data_remains_an_eager_playback_source() {
     let source = PlaybackSource::from(AudioData::new(vec![1, 2, 3], "audio/wav"));
 
     assert_eq!(source.loading_policy(), PlaybackLoadingPolicy::Eager);
+}
+
+#[test]
+fn graph_backing_is_an_immutable_owner_level_opt_in() {
+    let direct = PlaybackLifecycle::default();
+    assert_eq!(direct.graph_state(), PlaybackGraphState::NotRequested);
+    assert_eq!(
+        direct.audibility_capability(),
+        PlaybackAudibilityCapability::BestEffortMediaElement
+    );
+
+    let graph_backed = PlaybackLifecycle::new(PlaybackOptions::graph_backed());
+    assert_eq!(
+        graph_backed.graph_state(),
+        PlaybackGraphState::AwaitingSource
+    );
+    assert_eq!(
+        graph_backed.audibility_capability(),
+        PlaybackAudibilityCapability::EffectiveGraphGain
+    );
+}
+
+#[test]
+fn graph_state_is_orthogonal_and_persists_across_eligible_sources() {
+    let mut playback = PlaybackLifecycle::new(PlaybackOptions::graph_backed());
+    playback.set_muted(true);
+    playback.set_audibility_level(0.35).unwrap();
+
+    playback.loading();
+    playback.graph_preparing();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::Preparing);
+    assert_eq!(playback.transport(), PlaybackTransport::Idle);
+
+    playback.loaded();
+    playback.graph_suspended();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::Suspended);
+    playback.request_play().unwrap();
+    playback.graph_running();
+    playback.playing();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::Running);
+    assert_eq!(playback.transport(), PlaybackTransport::Playing);
+
+    playback.unload();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::AwaitingSource);
+    assert!(playback.muted());
+    assert_eq!(playback.audibility_level().value(), 0.35);
+    assert_eq!(
+        playback.audibility_capability(),
+        PlaybackAudibilityCapability::EffectiveGraphGain
+    );
+
+    playback.loading();
+    playback.graph_preparing();
+    playback.loaded();
+    playback.graph_running();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::Running);
+}
+
+#[test]
+fn graph_activation_and_later_interruption_are_recoverable() {
+    let mut playback = PlaybackLifecycle::new(PlaybackOptions::graph_backed());
+    playback.loading();
+    playback.graph_preparing();
+    playback.loaded();
+    playback.graph_suspended();
+    playback.request_play().unwrap();
+
+    let error = AudioError::new(AudioErrorKind::PlaybackFailure, "interaction required");
+    playback.graph_interaction_required(error.clone());
+    assert_eq!(
+        playback.graph_state(),
+        PlaybackGraphState::InteractionRequired
+    );
+    assert_eq!(playback.transport(), PlaybackTransport::Paused);
+    assert_eq!(
+        playback.play_failure(),
+        Some(&PlaybackPlayFailure::InteractionRequired(error.clone()))
+    );
+    playback.graph_running();
+    assert_eq!(
+        playback.graph_state(),
+        PlaybackGraphState::InteractionRequired
+    );
+    playback.graph_suspended();
+    assert_eq!(
+        playback.graph_state(),
+        PlaybackGraphState::InteractionRequired
+    );
+
+    playback.request_play().unwrap();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::Suspended);
+    assert_eq!(playback.play_failure(), None);
+    playback.graph_running();
+    playback.playing();
+
+    playback.graph_interaction_required(error.clone());
+    assert_eq!(playback.transport(), PlaybackTransport::Paused);
+    assert_eq!(
+        playback.graph_state(),
+        PlaybackGraphState::InteractionRequired
+    );
+    assert_eq!(
+        playback.play_failure(),
+        Some(&PlaybackPlayFailure::InteractionRequired(error))
+    );
+}
+
+#[test]
+fn terminal_graph_failure_degrades_only_gain_and_analysis() {
+    let mut playback = PlaybackLifecycle::new(PlaybackOptions::graph_backed());
+    playback.set_muted(true);
+    playback.set_audibility_level(0.35).unwrap();
+    playback.loading();
+    playback.graph_preparing();
+    playback.loaded();
+
+    playback.graph_unavailable();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::Unavailable);
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Playable);
+    assert_eq!(
+        playback.audibility_capability(),
+        PlaybackAudibilityCapability::BestEffortMediaElement
+    );
+    assert!(playback.muted());
+    assert_eq!(playback.audibility_level().value(), 0.35);
+
+    playback.request_play().unwrap();
+    playback.playing();
+    assert_eq!(playback.transport(), PlaybackTransport::Playing);
+    playback.unload();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::Unavailable);
+
+    playback.loading();
+    playback.graph_preparing();
+    assert_eq!(playback.graph_state(), PlaybackGraphState::Unavailable);
+}
+
+#[test]
+fn graph_gain_capability_is_qualified_for_the_current_route() {
+    let mut playback = PlaybackLifecycle::new(PlaybackOptions::graph_backed());
+
+    playback.direct_audibility();
+    assert_eq!(
+        playback.audibility_capability(),
+        PlaybackAudibilityCapability::BestEffortMediaElement
+    );
+
+    playback.graph_preparing();
+    assert_eq!(
+        playback.audibility_capability(),
+        PlaybackAudibilityCapability::EffectiveGraphGain
+    );
+
+    playback.graph_unavailable();
+    playback.graph_preparing();
+    assert_eq!(
+        playback.audibility_capability(),
+        PlaybackAudibilityCapability::BestEffortMediaElement
+    );
 }
 
 #[test]
@@ -477,4 +637,27 @@ fn unsupported_playback_snapshot_is_neutral_for_server_rendering() {
     let html = dioxus_ssr::render(&vdom);
 
     assert!(html.contains("Empty/Idle/Unavailable"));
+}
+
+#[test]
+fn graph_backed_playback_is_hydration_neutral_while_awaiting_a_source() {
+    fn app() -> Element {
+        let source = use_signal(|| None::<PlaybackSource>);
+        let player = use_audio_player_with_options(
+            source.into(),
+            Duration::from_secs(30),
+            PlaybackOptions::graph_backed(),
+        );
+        let snapshot = player.snapshot()();
+
+        rsx! {
+            output { "{snapshot.source:?}/{snapshot.transport:?}/{snapshot.graph:?}" }
+        }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+
+    assert!(html.contains("Empty/Idle/AwaitingSource"));
 }

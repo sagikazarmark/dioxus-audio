@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use std::cell::Cell;
+use std::fmt;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -162,70 +163,152 @@ pub enum AnalysisDomain {
     Spectrum,
 }
 
+/// An Analyser has no active source its owner can safely expose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnalysisUnavailable;
+
+impl fmt::Display for AnalysisUnavailable {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Analysis is unavailable")
+    }
+}
+
+impl std::error::Error for AnalysisUnavailable {}
+
 /// Opaque, cheap-to-clone reader for live audio analysis data.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct AudioAnalyser {
+    inner: Weak<AudioAnalyserInner>,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct AudioAnalyserInner {
     node: web_sys::AnalyserNode,
     sample_rate: f32,
+    available: Cell<bool>,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) struct AudioAnalyserControl {
+    inner: Rc<AudioAnalyserInner>,
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl fmt::Debug for AudioAnalyser {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AudioAnalyser")
+            .field("available", &self.is_available())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl PartialEq for AudioAnalyser {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.ptr_eq(&other.inner)
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl AudioAnalyserControl {
+    pub(crate) fn new(node: web_sys::AnalyserNode, sample_rate: f32) -> (Self, AudioAnalyser) {
+        let inner = Rc::new(AudioAnalyserInner {
+            node,
+            sample_rate,
+            available: Cell::new(false),
+        });
+        let analyser = AudioAnalyser {
+            inner: Rc::downgrade(&inner),
+        };
+        (Self { inner }, analyser)
+    }
+
+    pub(crate) fn set_available(&self, available: bool) {
+        self.inner.available.set(available);
+    }
+
+    pub(crate) fn node(&self) -> &web_sys::AnalyserNode {
+        &self.inner.node
+    }
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 impl AudioAnalyser {
-    pub(crate) fn new(node: web_sys::AnalyserNode, sample_rate: f32) -> Self {
-        Self { node, sample_rate }
+    fn available_inner(&self) -> Result<Rc<AudioAnalyserInner>, AnalysisUnavailable> {
+        self.inner
+            .upgrade()
+            .filter(|inner| inner.available.get())
+            .ok_or(AnalysisUnavailable)
     }
 
+    pub fn is_available(&self) -> bool {
+        self.available_inner().is_ok()
+    }
+
+    /// Read current normalized values, or report that the owning source is unavailable.
+    pub fn try_read(&self, domain: AnalysisDomain) -> Result<Vec<f32>, AnalysisUnavailable> {
+        let inner = self.available_inner()?;
+        Ok(read_node(&inner.node, domain))
+    }
+
+    /// Read current normalized values, returning no samples while unavailable.
+    ///
+    /// Use [`Self::try_read`] when source availability must be distinguished from
+    /// a valid empty result.
     pub fn read(&self, domain: AnalysisDomain) -> Vec<f32> {
-        match domain {
-            AnalysisDomain::Waveform => {
-                let mut samples = vec![0_u8; self.node.fft_size() as usize];
-                self.node.get_byte_time_domain_data(&mut samples);
-                samples
-                    .into_iter()
-                    .map(|sample| ((sample as f32 - 128.0) / 128.0).clamp(-1.0, 1.0))
-                    .collect()
-            }
-            AnalysisDomain::Spectrum => {
-                let samples = js_sys::Uint8Array::new_with_length(self.node.frequency_bin_count());
-                self.node.get_byte_frequency_data_with_u8_array(&samples);
-                let mut values = vec![0_u8; samples.length() as usize];
-                samples.copy_to(&mut values);
-                values
-                    .into_iter()
-                    .map(|sample| sample as f32 / 255.0)
-                    .collect()
-            }
-        }
+        self.try_read(domain).unwrap_or_default()
+    }
+
+    pub fn try_level(&self) -> Result<f32, AnalysisUnavailable> {
+        Ok(rms_level(&self.try_read(AnalysisDomain::Waveform)?))
     }
 
     pub fn level(&self) -> f32 {
-        rms_level(&self.read(AnalysisDomain::Waveform))
+        self.try_level().unwrap_or(0.0)
     }
 
-    fn snapshot(&self) -> LiveAnalysisSnapshot {
-        let time_domain: Arc<[f32]> = self.read(AnalysisDomain::Waveform).into();
-        let frequency_domain = self.read(AnalysisDomain::Spectrum).into();
-        LiveAnalysisSnapshot {
+    fn snapshot(&self) -> Option<LiveAnalysisSnapshot> {
+        let inner = self.available_inner().ok()?;
+        let time_domain: Arc<[f32]> = read_node(&inner.node, AnalysisDomain::Waveform).into();
+        let frequency_domain = read_node(&inner.node, AnalysisDomain::Spectrum).into();
+        Some(LiveAnalysisSnapshot {
             level: rms_level(&time_domain),
             time_domain,
             frequency_domain,
-            metadata: self.metadata(),
+            metadata: AnalysisMetadata::new(
+                inner.sample_rate,
+                inner.node.fft_size(),
+                inner.node.min_decibels() as f32,
+                inner.node.max_decibels() as f32,
+                inner.node.smoothing_time_constant(),
+            ),
+        })
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn read_node(node: &web_sys::AnalyserNode, domain: AnalysisDomain) -> Vec<f32> {
+    match domain {
+        AnalysisDomain::Waveform => {
+            let mut samples = vec![0_u8; node.fft_size() as usize];
+            node.get_byte_time_domain_data(&mut samples);
+            samples
+                .into_iter()
+                .map(|sample| ((sample as f32 - 128.0) / 128.0).clamp(-1.0, 1.0))
+                .collect()
         }
-    }
-
-    fn metadata(&self) -> AnalysisMetadata {
-        AnalysisMetadata::new(
-            self.sample_rate,
-            self.node.fft_size(),
-            self.node.min_decibels() as f32,
-            self.node.max_decibels() as f32,
-            self.node.smoothing_time_constant(),
-        )
-    }
-
-    pub(crate) fn node(&self) -> &web_sys::AnalyserNode {
-        &self.node
+        AnalysisDomain::Spectrum => {
+            let samples = js_sys::Uint8Array::new_with_length(node.frequency_bin_count());
+            node.get_byte_frequency_data_with_u8_array(&samples);
+            let mut values = vec![0_u8; samples.length() as usize];
+            samples.copy_to(&mut values);
+            values
+                .into_iter()
+                .map(|sample| sample as f32 / 255.0)
+                .collect()
+        }
     }
 }
 
@@ -237,21 +320,28 @@ pub struct AudioAnalyser {
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl AudioAnalyser {
+    pub fn is_available(&self) -> bool {
+        false
+    }
+
+    pub fn try_read(&self, _domain: AnalysisDomain) -> Result<Vec<f32>, AnalysisUnavailable> {
+        Err(AnalysisUnavailable)
+    }
+
     pub fn read(&self, _domain: AnalysisDomain) -> Vec<f32> {
         Vec::new()
+    }
+
+    pub fn try_level(&self) -> Result<f32, AnalysisUnavailable> {
+        Err(AnalysisUnavailable)
     }
 
     pub fn level(&self) -> f32 {
         0.0
     }
 
-    fn snapshot(&self) -> LiveAnalysisSnapshot {
-        LiveAnalysisSnapshot {
-            time_domain: Arc::from([]),
-            frequency_domain: Arc::from([]),
-            level: 0.0,
-            metadata: AnalysisMetadata::new(0.0, 0, 0.0, 0.0, 0.0),
-        }
+    fn snapshot(&self) -> Option<LiveAnalysisSnapshot> {
+        None
     }
 }
 
@@ -285,25 +375,23 @@ pub(crate) fn use_live_analysis_domain(
 pub(crate) fn use_live_analysis_level(
     analyser: ReadSignal<Option<AudioAnalyser>>,
 ) -> ReadSignal<Option<f32>> {
-    use_scheduled_analysis(
-        analyser,
-        LiveAnalysisOptions::default(),
-        AudioAnalyser::level,
-    )
+    use_scheduled_analysis(analyser, LiveAnalysisOptions::default(), |analyser| {
+        analyser.try_level().ok()
+    })
 }
 
-fn read_waveform(analyser: &AudioAnalyser) -> Arc<[f32]> {
-    analyser.read(AnalysisDomain::Waveform).into()
+fn read_waveform(analyser: &AudioAnalyser) -> Option<Arc<[f32]>> {
+    Some(analyser.try_read(AnalysisDomain::Waveform).ok()?.into())
 }
 
-fn read_spectrum(analyser: &AudioAnalyser) -> Arc<[f32]> {
-    analyser.read(AnalysisDomain::Spectrum).into()
+fn read_spectrum(analyser: &AudioAnalyser) -> Option<Arc<[f32]>> {
+    Some(analyser.try_read(AnalysisDomain::Spectrum).ok()?.into())
 }
 
 fn use_scheduled_analysis<T: 'static>(
     analyser: ReadSignal<Option<AudioAnalyser>>,
     options: LiveAnalysisOptions,
-    collect: fn(&AudioAnalyser) -> T,
+    collect: fn(&AudioAnalyser) -> Option<T>,
 ) -> ReadSignal<Option<T>> {
     let parameters = use_memo(use_reactive!(|(analyser, options)| (analyser, options)));
     #[allow(unused_mut)]
@@ -323,24 +411,31 @@ fn use_scheduled_analysis<T: 'static>(
             };
             let scheduler = scheduler.clone();
             let scheduler_for_publish = scheduler.clone();
-            spawn(run_live_analysis_schedule(
-                scheduler,
-                generation,
-                options.cadence(),
-                move || {
-                    if analyser.peek().as_ref() != Some(&source_analyser) {
-                        return false;
-                    }
-                    let next = collect(&source_analyser);
-                    if !scheduler_for_publish.is_current(generation)
-                        || analyser.peek().as_ref() != Some(&source_analyser)
-                    {
-                        return false;
-                    }
-                    value.set(Some(next));
-                    true
-                },
-            ));
+            gloo_timers::callback::Timeout::new(0, move || {
+                wasm_bindgen_futures::spawn_local(run_live_analysis_schedule(
+                    scheduler,
+                    generation,
+                    options.cadence(),
+                    move || {
+                        if analyser.peek().as_ref() != Some(&source_analyser) {
+                            return false;
+                        }
+                        let next = collect(&source_analyser);
+                        if !scheduler_for_publish.is_current(generation)
+                            || analyser.peek().as_ref() != Some(&source_analyser)
+                        {
+                            return false;
+                        }
+                        if let Some(next) = next {
+                            value.set(Some(next));
+                        } else if value.peek().is_some() {
+                            value.set(None);
+                        }
+                        true
+                    },
+                ));
+            })
+            .forget();
         }
 
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]

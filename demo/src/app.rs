@@ -10,7 +10,7 @@ use crate::pages::{
     devices::Devices,
     home::Home,
     not_found::NotFound,
-    playback::{Playback, PlaybackSource},
+    playback::{GraphPlayback, Playback, PlaybackSource},
     recorder::Recorder,
     styles::Styles,
     visualizers::Visualizers,
@@ -30,6 +30,8 @@ pub enum Route {
     Playback {},
     #[route("/playback-source")]
     PlaybackSource {},
+    #[route("/graph-playback")]
+    GraphPlayback {},
     #[route("/devices")]
     Devices {},
     #[route("/visualizers")]
@@ -72,6 +74,7 @@ fn DemoLayout() -> Element {
                         SidebarNavLink { route: Route::Recorder {}, label: "Record and review" }
                         SidebarNavLink { route: Route::Playback {}, label: "Playback" }
                         SidebarNavLink { route: Route::PlaybackSource {}, label: "URL Playback Source" }
+                        SidebarNavLink { route: Route::GraphPlayback {}, label: "Playback-backed Analysis" }
                         SidebarNavLink { route: Route::Styles {}, label: "Style customization" }
                     }
                     SidebarNavSection { label: "Input",

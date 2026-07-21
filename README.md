@@ -423,6 +423,38 @@ invalidates an outstanding play request, and returns a loaded source to
 source is replaced or unloaded and applies to the next loaded source. It is
 separate from Bounded Playback over a Waveform Selection.
 
+Use `play_bounded_once()` to play one controlled `WaveformSelection` once:
+
+```rust
+use dioxus_audio::analysis::WaveformSelection;
+
+let selection = WaveformSelection::new(12.5, 18.0);
+controller.play_bounded_once(selection)?;
+# Ok::<(), dioxus_audio::playback::PlaybackCommandError>(())
+```
+
+The command requires a playable source, a positive authoritative duration
+reported by the browser, and a non-collapsed selection wholly inside that
+duration. The `initial_duration` hook argument is presentation fallback and does
+not make a duration authoritative. A valid run pauses, seeks to the selection
+start, waits for the correlated `seeked` outcome, requests play, and waits for
+browser confirmation before `PlaybackSnapshot::bounded` becomes `Active`.
+
+Ordinary `pause()` preserves the bounded range and `play()` resumes it. An
+ordinary `seek()` or `skip()` cancels boundary enforcement without changing the
+application-owned Waveform Selection. `cancel_bounded_playback()` explicitly
+removes the bound, while source replacement, unload, stop, and owner cleanup
+clear it and invalidate late seek, play, pause, and deadline outcomes. At the
+one-shot end, Playback pauses, observable position is clamped to the exact
+selection end, and the bounded phase becomes `Completed`. Seek timeout or play
+activation rejection becomes a bounded `Failed` phase without failing the
+Playback Source, so ordinary Playback remains available.
+
+Pause-seek-play ordering, lifecycle publication, completion clamping, and stale
+outcome rejection are Controller guarantees. Audible boundary timing is browser
+scheduling behavior: Bounded Playback is not sample-accurate and makes no
+maximum-overshoot promise.
+
 Mute is observable through `muted()` and can be changed with `set_muted()` or
 `toggle_muted()` without pausing Playback, seeking, or changing the retained
 audibility level. `set_audibility_level()` accepts a finite normalized value in

@@ -1,5 +1,79 @@
 import { expect, test } from "./fixtures";
 
+type BoundedPlaybackTestWindow = typeof globalThis & {
+  boundedPlaybackElements?: HTMLMediaElement[];
+  boundedPlaybackElement?: HTMLMediaElement;
+  boundedPlaybackLog?: string[];
+  resolveBoundedPlay?: () => void;
+  setBoundedSeeking?: (seeking: boolean) => void;
+};
+
+async function capturePlaybackElements(page: import("@playwright/test").Page) {
+  await page.addInitScript(() => {
+    const NativeAudio = window.Audio;
+    const elements: HTMLMediaElement[] = [];
+    (window as BoundedPlaybackTestWindow).boundedPlaybackElements = elements;
+    Object.defineProperty(window, "Audio", {
+      configurable: true,
+      value: function Audio(source?: string) {
+        const element = new NativeAudio(source);
+        elements.push(element);
+        return element;
+      },
+    });
+  });
+}
+
+async function controlShortPlayback(
+  page: import("@playwright/test").Page,
+  playOutcome: "hold" | "reject" = "hold",
+) {
+  await page.evaluate((outcome) => {
+    const testWindow = window as BoundedPlaybackTestWindow;
+    const element = testWindow.boundedPlaybackElements
+      ?.filter((candidate) => candidate.duration > 3)
+      .slice(-1)[0];
+    if (!element) throw new Error("short Playback element was not created");
+
+    testWindow.boundedPlaybackElement = element;
+    testWindow.boundedPlaybackLog = [];
+    let currentTime = 0;
+    let paused = true;
+    let seeking = false;
+    Object.defineProperty(element, "currentTime", {
+      configurable: true,
+      get: () => currentTime,
+      set: (value: number) => {
+        currentTime = value;
+        testWindow.boundedPlaybackLog?.push(`seek:${value}`);
+      },
+    });
+    Object.defineProperty(element, "paused", {
+      configurable: true,
+      get: () => paused,
+    });
+    Object.defineProperty(element, "seeking", {
+      configurable: true,
+      get: () => seeking,
+    });
+    testWindow.setBoundedSeeking = (next) => {
+      seeking = next;
+    };
+    element.pause = () => {
+      paused = true;
+      testWindow.boundedPlaybackLog?.push("pause");
+    };
+    element.play = () => {
+      paused = false;
+      testWindow.boundedPlaybackLog?.push("play");
+      return new Promise<void>((resolve, reject) => {
+        testWindow.resolveBoundedPlay = resolve;
+        if (outcome === "reject") reject(new Error("bounded activation rejected"));
+      });
+    };
+  }, playOutcome);
+}
+
 test("Waveform Data preserves mode and channels in a narrow viewport", async ({
   openRoute,
   page,
@@ -304,4 +378,213 @@ test("interactive Waveforms fit a mobile viewport without losing controls", asyn
     });
   });
   expect(controlsFit).toBe(true);
+});
+
+test("Bounded Playback validates authoritative duration and orders pause, seek, and play", async ({
+  openRoute,
+  page,
+}) => {
+  await capturePlaybackElements(page);
+  await openRoute("/waveforms", "Preview and select waveform ranges");
+
+  const episodeState = page.locator(".episode-bounded-playback-state");
+  await expect(episodeState).toHaveAttribute("data-source", "playable");
+  await page.getByRole("button", { name: "Play episode selection once" }).click();
+  await expect(episodeState).toHaveAttribute("data-phase", "none");
+  await expect(episodeState.getByRole("alert")).toContainText(
+    "outside the Playback duration",
+  );
+
+  const controls = page.getByRole("group", { name: "Short Bounded Playback" });
+  const state = controls.locator(".short-bounded-playback-state");
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await controlShortPlayback(page);
+
+  await controls.getByRole("button", { name: "Play short selection once" }).click();
+  await expect(state).toHaveAttribute("data-phase", "seeking");
+  expect(
+    await page.evaluate(
+      () => (window as BoundedPlaybackTestWindow).boundedPlaybackLog,
+    ),
+  ).toEqual(["pause", "seek:0.5"]);
+
+  await page.evaluate(() => {
+    (window as BoundedPlaybackTestWindow).boundedPlaybackElement?.dispatchEvent(
+      new Event("seeked"),
+    );
+  });
+  await expect(state).toHaveAttribute("data-phase", "activating");
+  expect(
+    await page.evaluate(
+      () => (window as BoundedPlaybackTestWindow).boundedPlaybackLog,
+    ),
+  ).toEqual(["pause", "seek:0.5", "play"]);
+
+  await page.evaluate(() => {
+    (window as BoundedPlaybackTestWindow).resolveBoundedPlay?.();
+  });
+  await expect(state).toHaveAttribute("data-phase", "active");
+  await expect(state).toHaveAttribute("data-transport", "playing");
+
+  await controls.getByRole("button", { name: "Pause Bounded Playback" }).click();
+  await expect(state).toHaveAttribute("data-phase", "paused");
+  await controls.getByRole("button", { name: "Resume Bounded Playback" }).click();
+  await expect(state).toHaveAttribute("data-phase", "activating");
+  await page.evaluate(() => {
+    (window as BoundedPlaybackTestWindow).resolveBoundedPlay?.();
+  });
+  await expect(state).toHaveAttribute("data-phase", "active");
+
+  await page.evaluate(() => {
+    const element = (window as BoundedPlaybackTestWindow).boundedPlaybackElement;
+    if (!element) throw new Error("controlled Playback element is missing");
+    element.currentTime = 3.75;
+    element.dispatchEvent(new Event("timeupdate"));
+  });
+  await expect(state).toHaveAttribute("data-phase", "completed");
+  await expect(state).toHaveAttribute("data-position", "3.5");
+  await expect(state).toHaveAttribute("data-transport", "paused");
+});
+
+test("direct seek, replacement, and unload invalidate stale Bounded Playback outcomes", async ({
+  openRoute,
+  page,
+}) => {
+  await capturePlaybackElements(page);
+  await openRoute("/waveforms", "Preview and select waveform ranges");
+  const controls = page.getByRole("group", { name: "Short Bounded Playback" });
+  const state = controls.locator(".short-bounded-playback-state");
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await controlShortPlayback(page);
+
+  await controls.getByRole("button", { name: "Play short selection once" }).click();
+  await controls
+    .getByRole("button", { name: "Seek short Playback directly" })
+    .click();
+  await expect(state).toHaveAttribute("data-phase", "none");
+  await expect(state).toHaveAttribute("data-position", "1");
+  await expect(state).toHaveAttribute("data-phase", "none");
+  await expect(page.getByText("Independent selection: 0.50 s to 3.50 s")).toBeVisible();
+
+  await controls.getByRole("button", { name: "Play short selection once" }).click();
+  await page.evaluate(() => {
+    const testWindow = window as BoundedPlaybackTestWindow;
+    testWindow.setBoundedSeeking?.(true);
+    testWindow.boundedPlaybackElement?.dispatchEvent(new Event("seeked"));
+  });
+  await expect(state).toHaveAttribute("data-phase", "seeking");
+  await page.evaluate(() => {
+    const testWindow = window as BoundedPlaybackTestWindow;
+    testWindow.setBoundedSeeking?.(false);
+    testWindow.boundedPlaybackElement?.dispatchEvent(new Event("seeked"));
+  });
+  await expect(state).toHaveAttribute("data-phase", "activating");
+  await controls
+    .getByRole("button", { name: "Seek short Playback directly" })
+    .click();
+  await page.evaluate(() => {
+    (window as BoundedPlaybackTestWindow).resolveBoundedPlay?.();
+  });
+  await expect(state).toHaveAttribute("data-phase", "none");
+
+  await controls.getByRole("button", { name: "Play short selection once" }).click();
+  const oldElement = await page.evaluateHandle(
+    () => (window as BoundedPlaybackTestWindow).boundedPlaybackElement,
+  );
+  await controls.getByRole("button", { name: "Replace short source" }).click();
+  await expect(state).toHaveAttribute("data-phase", "none");
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await page.evaluate((element) => {
+    element?.dispatchEvent(new Event("seeked"));
+    (window as BoundedPlaybackTestWindow).resolveBoundedPlay?.();
+  }, oldElement);
+  await expect(state).toHaveAttribute("data-phase", "none");
+  await expect(state).toHaveAttribute("data-transport", "idle");
+
+  await controlShortPlayback(page);
+  await controls.getByRole("button", { name: "Play short selection once" }).click();
+  await page.evaluate(() => {
+    (window as BoundedPlaybackTestWindow).boundedPlaybackElement?.dispatchEvent(
+      new Event("seeked"),
+    );
+  });
+  await expect(state).toHaveAttribute("data-phase", "activating");
+  const activationElement = await page.evaluateHandle(
+    () => (window as BoundedPlaybackTestWindow).boundedPlaybackElement,
+  );
+  await controls.getByRole("button", { name: "Replace short source" }).click();
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await page.evaluate((element) => {
+    (window as BoundedPlaybackTestWindow).resolveBoundedPlay?.();
+    element?.dispatchEvent(new Event("playing"));
+  }, activationElement);
+  await expect(state).toHaveAttribute("data-phase", "none");
+  await expect(state).toHaveAttribute("data-transport", "idle");
+
+  await controlShortPlayback(page);
+  await page.evaluate(() => {
+    const element = (window as BoundedPlaybackTestWindow).boundedPlaybackElement;
+    if (element) element.playbackRate = 16;
+  });
+  await controls.getByRole("button", { name: "Play short selection once" }).click();
+  await page.evaluate(() => {
+    const testWindow = window as BoundedPlaybackTestWindow;
+    testWindow.boundedPlaybackElement?.dispatchEvent(new Event("seeked"));
+    testWindow.resolveBoundedPlay?.();
+  });
+  await expect(state).toHaveAttribute("data-phase", "active");
+  const unloadedElement = await page.evaluateHandle(
+    () => (window as BoundedPlaybackTestWindow).boundedPlaybackElement,
+  );
+  await controls.getByRole("button", { name: "Unload short source" }).click();
+  await expect(state).toHaveAttribute("data-source", "empty");
+  await expect(state).toHaveAttribute("data-phase", "none");
+  await page.evaluate((element) => {
+    if (element) {
+      element.currentTime = 3.75;
+      element.dispatchEvent(new Event("pause"));
+      element.dispatchEvent(new Event("timeupdate"));
+      element.dispatchEvent(new Event("ended"));
+    }
+  }, unloadedElement);
+  await page.waitForTimeout(300);
+  await expect(state).toHaveAttribute("data-source", "empty");
+  await expect(state).toHaveAttribute("data-phase", "none");
+});
+
+test("bounded seek and activation failures leave ordinary Playback usable", async ({
+  openRoute,
+  page,
+}) => {
+  await capturePlaybackElements(page);
+  await openRoute("/waveforms", "Preview and select waveform ranges");
+  const controls = page.getByRole("group", { name: "Short Bounded Playback" });
+  const state = controls.locator(".short-bounded-playback-state");
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await controlShortPlayback(page);
+
+  await controls.getByRole("button", { name: "Play short selection once" }).click();
+  await expect(state).toHaveAttribute("data-failure", "seek-timeout", {
+    timeout: 5_000,
+  });
+  await expect(state).toHaveAttribute("data-source", "playable");
+
+  await controlShortPlayback(page, "reject");
+  await controls.getByRole("button", { name: "Play short selection once" }).click();
+  await page.evaluate(() => {
+    (window as BoundedPlaybackTestWindow).boundedPlaybackElement?.dispatchEvent(
+      new Event("seeked"),
+    );
+  });
+  await expect(state).toHaveAttribute("data-failure", "activation-rejected");
+  await expect(state).toHaveAttribute("data-source", "playable");
+
+  await controlShortPlayback(page);
+  await controls.getByRole("button", { name: "Resume Bounded Playback" }).click();
+  await page.evaluate(() => {
+    (window as BoundedPlaybackTestWindow).resolveBoundedPlay?.();
+  });
+  await expect(state).toHaveAttribute("data-phase", "none");
+  await expect(state).toHaveAttribute("data-transport", "playing");
+  await expect(state).toHaveAttribute("data-source", "playable");
 });

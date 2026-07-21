@@ -6,7 +6,10 @@ use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::components::{
     InteractiveWaveform, Waveform, WaveformPreview, WaveformRangeSelector,
 };
-use dioxus_audio::playback::{PlaybackSource, use_audio_player};
+use dioxus_audio::playback::{
+    BoundedPlaybackFailure, BoundedPlaybackPhase, PlaybackSource, PlaybackSourceLifecycle,
+    PlaybackTransport, use_audio_player,
+};
 use dioxus_audio::waveform::{SignedEnvelope, WaveformData, WaveformLevel};
 
 /// Render compact Peaks and edit a source-time range over the same data.
@@ -24,12 +27,16 @@ pub fn WaveformsExample() -> Element {
     let mut interactive_selection = use_signal(|| WaveformSelection::new(2.25, 9.5));
     let mut interactive_commits = use_signal(|| 0_u32);
     let interactive_selected = interactive_selection();
-    let primary_source = use_signal(|| Some(PlaybackSource::from(generated_audio(2, 330.0))));
+    let mut primary_source = use_signal(|| Some(PlaybackSource::from(generated_audio(2, 330.0))));
     let primary_controller = use_audio_player(primary_source.into(), Duration::from_secs(2));
+    let primary_snapshot = primary_controller.snapshot()();
+    let mut primary_bounded_error = use_signal(|| None::<String>);
     let mut short_selection = use_signal(|| WaveformSelection::new(0.5, 3.5));
     let short_selected = short_selection();
-    let short_source = use_signal(|| Some(PlaybackSource::from(generated_audio(4, 550.0))));
+    let mut short_source = use_signal(|| Some(PlaybackSource::from(generated_audio(4, 550.0))));
     let short_controller = use_audio_player(short_source.into(), Duration::from_secs(4));
+    let short_snapshot = short_controller.snapshot()();
+    let mut short_bounded_error = use_signal(|| None::<String>);
 
     rsx! {
         div { class: "grid gap-6",
@@ -102,8 +109,50 @@ pub fn WaveformsExample() -> Element {
                     p { class: "mt-1 text-center text-xs text-base-content/50",
                         "12-second Waveform; authoritative Playback duration: 2 seconds"
                     }
+                    div { class: "mt-3 flex flex-wrap justify-center gap-2",
+                        button {
+                            class: "btn btn-primary btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                primary_bounded_error.set(
+                                    primary_controller
+                                        .play_bounded_once(interactive_selection())
+                                        .err()
+                                        .map(|error| error.to_string()),
+                                );
+                            },
+                            "Play episode selection once"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                primary_source.set(Some(PlaybackSource::from(generated_audio(2, 440.0))));
+                            },
+                            "Replace episode source"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| primary_source.set(None),
+                            "Unload episode source"
+                        }
+                    }
+                    output {
+                        class: "episode-bounded-playback-state mt-2 block text-center text-xs text-base-content/60",
+                        "data-phase": bounded_phase_name(primary_snapshot.bounded.as_ref()),
+                        "data-failure": bounded_failure_name(primary_snapshot.bounded.as_ref()),
+                        "data-source": source_lifecycle_name(&primary_snapshot.source),
+                        "data-transport": transport_name(primary_snapshot.transport),
+                        "data-position": primary_controller.position()().as_secs_f64().to_string(),
+                        if let Some(error) = primary_bounded_error() {
+                            span { role: "alert", "{error}" }
+                        } else {
+                            span { "Episode selection Playback: {bounded_phase_name(primary_snapshot.bounded.as_ref())}" }
+                        }
+                    }
                 }
-                div {
+                div { role: "group", aria_label: "Short Bounded Playback",
                     InteractiveWaveform {
                         data: short_waveform,
                         controller: short_controller,
@@ -120,9 +169,135 @@ pub fn WaveformsExample() -> Element {
                     p { class: "mt-2 text-center text-xs text-base-content/50",
                         "Independent selection: {short_selected.start():.2} s to {short_selected.end():.2} s"
                     }
+                    div { class: "mt-3 flex flex-wrap justify-center gap-2",
+                        button {
+                            class: "btn btn-primary btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                short_bounded_error.set(
+                                    short_controller
+                                        .play_bounded_once(short_selection())
+                                        .err()
+                                        .map(|error| error.to_string()),
+                                );
+                            },
+                            "Play short selection once"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                short_bounded_error.set(
+                                    short_controller.pause().err().map(|error| error.to_string()),
+                                );
+                            },
+                            "Pause Bounded Playback"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                short_bounded_error.set(
+                                    short_controller.play().err().map(|error| error.to_string()),
+                                );
+                            },
+                            "Resume Bounded Playback"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| short_controller.cancel_bounded_playback(),
+                            "Cancel Bounded Playback"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| short_controller.seek(Duration::from_secs(1)),
+                            "Seek short Playback directly"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                short_source.set(Some(PlaybackSource::from(generated_audio(4, 660.0))));
+                            },
+                            "Replace short source"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| short_source.set(None),
+                            "Unload short source"
+                        }
+                    }
+                    output {
+                        class: "short-bounded-playback-state mt-2 block text-center text-xs text-base-content/60",
+                        "data-phase": bounded_phase_name(short_snapshot.bounded.as_ref()),
+                        "data-failure": bounded_failure_name(short_snapshot.bounded.as_ref()),
+                        "data-source": source_lifecycle_name(&short_snapshot.source),
+                        "data-transport": transport_name(short_snapshot.transport),
+                        "data-position": short_controller.position()().as_secs_f64().to_string(),
+                        if let Some(error) = short_bounded_error() {
+                            span { role: "alert", "{error}" }
+                        } else {
+                            span { "Bounded Playback for short selection: {bounded_phase_name(short_snapshot.bounded.as_ref())}" }
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+fn bounded_failure_name(
+    bounded: Option<&dioxus_audio::playback::BoundedPlaybackSnapshot>,
+) -> &'static str {
+    match bounded.map(|bounded| bounded.phase) {
+        Some(BoundedPlaybackPhase::Failed(BoundedPlaybackFailure::SeekTimedOut)) => "seek-timeout",
+        Some(BoundedPlaybackPhase::Failed(BoundedPlaybackFailure::ActivationRejected)) => {
+            "activation-rejected"
+        }
+        Some(BoundedPlaybackPhase::Failed(BoundedPlaybackFailure::PauseRejected)) => {
+            "pause-rejected"
+        }
+        _ => "none",
+    }
+}
+
+fn bounded_phase_name(
+    bounded: Option<&dioxus_audio::playback::BoundedPlaybackSnapshot>,
+) -> &'static str {
+    match bounded.map(|bounded| bounded.phase) {
+        None => "none",
+        Some(BoundedPlaybackPhase::Seeking) => "seeking",
+        Some(BoundedPlaybackPhase::Activating) => "activating",
+        Some(BoundedPlaybackPhase::Active) => "active",
+        Some(BoundedPlaybackPhase::Paused) => "paused",
+        Some(BoundedPlaybackPhase::Completed) => "completed",
+        Some(BoundedPlaybackPhase::Failed(_)) => "failed",
+        Some(_) => "unknown",
+    }
+}
+
+fn source_lifecycle_name(source: &PlaybackSourceLifecycle) -> &'static str {
+    match source {
+        PlaybackSourceLifecycle::Empty => "empty",
+        PlaybackSourceLifecycle::Dormant => "dormant",
+        PlaybackSourceLifecycle::Loading => "loading",
+        PlaybackSourceLifecycle::Playable => "playable",
+        PlaybackSourceLifecycle::Failed => "failed",
+        _ => "unknown",
+    }
+}
+
+fn transport_name(transport: PlaybackTransport) -> &'static str {
+    match transport {
+        PlaybackTransport::Idle => "idle",
+        PlaybackTransport::PlayPending => "play-pending",
+        PlaybackTransport::Playing => "playing",
+        PlaybackTransport::Paused => "paused",
+        PlaybackTransport::Ended => "ended",
+        _ => "unknown",
     }
 }
 

@@ -10,6 +10,7 @@ use crate::AudioData;
 use crate::AudioError;
 use crate::AudioErrorKind;
 use crate::analysis::AudioAnalyser;
+use crate::analysis::WaveformSelection;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
@@ -345,6 +346,62 @@ pub enum PlaybackPlayFailure {
     Unknown(AudioError),
 }
 
+/// The mode of one Bounded Playback operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BoundedPlaybackMode {
+    /// Play the selected source-time range once.
+    Once,
+}
+
+/// A failure scoped to one Bounded Playback operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BoundedPlaybackFailure {
+    /// The browser did not confirm the seek to the selected start.
+    SeekTimedOut,
+    /// The browser rejected activation after the bounded seek completed.
+    ActivationRejected,
+    /// The browser rejected a pause required by the bounded operation.
+    PauseRejected,
+}
+
+/// The observable lifecycle of one Bounded Playback operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BoundedPlaybackPhase {
+    /// Playback is paused while seeking to the selected start.
+    Seeking,
+    /// The seek completed and Playback is awaiting browser play confirmation.
+    Activating,
+    /// The browser confirmed Playback and the selected end is being enforced.
+    Active,
+    /// Playback is paused while retaining the selected range for resume.
+    Paused,
+    /// The one-shot operation stopped and clamped observable position to its end.
+    Completed,
+    /// The bounded operation failed without failing its Playback Source.
+    Failed(BoundedPlaybackFailure),
+}
+
+impl BoundedPlaybackPhase {
+    /// Whether this phase still owns future Playback transport behavior.
+    pub fn is_enforcing(self) -> bool {
+        matches!(
+            self,
+            Self::Seeking | Self::Activating | Self::Active | Self::Paused
+        )
+    }
+}
+
+/// One coherent observation of a Controller-owned Bounded Playback operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundedPlaybackSnapshot {
+    pub range: WaveformSelection,
+    pub mode: BoundedPlaybackMode,
+    pub phase: BoundedPlaybackPhase,
+}
+
 impl PlaybackPlayFailure {
     pub fn error(&self) -> &AudioError {
         match self {
@@ -451,6 +508,8 @@ pub struct PlaybackSnapshot {
     /// Ordered initial URL failures, populated when no alternative becomes playable.
     pub alternative_failures: Arc<[PlaybackAlternativeFailure]>,
     pub play_failure: Option<PlaybackPlayFailure>,
+    /// A one-operation source-time bound, independent from ordinary Playback state.
+    pub bounded: Option<BoundedPlaybackSnapshot>,
     /// Whole-source repeat preference, retained across source replacement and unload.
     pub repeat: bool,
     /// Mute preference, retained independently from transport and audibility level.
@@ -476,6 +535,7 @@ impl Default for PlaybackSnapshot {
             source_failure: None,
             alternative_failures: Arc::from([]),
             play_failure: None,
+            bounded: None,
             repeat: false,
             muted: false,
             audibility_level: PlaybackAudibilityLevel::FULL,
@@ -549,6 +609,101 @@ impl PlaybackLifecycle {
 
     pub fn play_failure(&self) -> Option<&PlaybackPlayFailure> {
         self.snapshot.play_failure.as_ref()
+    }
+
+    pub fn bounded(&self) -> Option<&BoundedPlaybackSnapshot> {
+        self.snapshot.bounded.as_ref()
+    }
+
+    /// Begin one Bounded Playback run after validating its authoritative timeline.
+    pub fn start_bounded_once(
+        &mut self,
+        range: WaveformSelection,
+        duration_secs: f64,
+    ) -> Result<(), PlaybackCommandError> {
+        if self.snapshot.source != PlaybackSourceLifecycle::Playable {
+            return Err(PlaybackCommandError("audio is not loaded"));
+        }
+        if !duration_secs.is_finite() || duration_secs <= 0.0 {
+            return Err(PlaybackCommandError(
+                "authoritative audio duration is unavailable",
+            ));
+        }
+        if range.is_collapsed() {
+            return Err(PlaybackCommandError("Waveform Selection is collapsed"));
+        }
+        if !range.is_playable_within(duration_secs) {
+            return Err(PlaybackCommandError(
+                "Waveform Selection is outside the Playback duration",
+            ));
+        }
+
+        self.snapshot.bounded = Some(BoundedPlaybackSnapshot {
+            range,
+            mode: BoundedPlaybackMode::Once,
+            phase: BoundedPlaybackPhase::Seeking,
+        });
+        Ok(())
+    }
+
+    pub fn bounded_seeking(&mut self) {
+        if let Some(bounded) = self.snapshot.bounded.as_mut()
+            && bounded.phase.is_enforcing()
+        {
+            bounded.phase = BoundedPlaybackPhase::Seeking;
+        }
+    }
+
+    pub fn bounded_activating(&mut self) {
+        if let Some(bounded) = self.snapshot.bounded.as_mut()
+            && bounded.phase.is_enforcing()
+        {
+            bounded.phase = BoundedPlaybackPhase::Activating;
+        }
+    }
+
+    pub fn bounded_active(&mut self) {
+        if let Some(bounded) = self.snapshot.bounded.as_mut()
+            && bounded.phase == BoundedPlaybackPhase::Activating
+        {
+            bounded.phase = BoundedPlaybackPhase::Active;
+        }
+    }
+
+    pub fn bounded_paused(&mut self) {
+        if let Some(bounded) = self.snapshot.bounded.as_mut()
+            && bounded.phase.is_enforcing()
+        {
+            bounded.phase = BoundedPlaybackPhase::Paused;
+        }
+    }
+
+    pub fn bounded_completed(&mut self) {
+        if let Some(bounded) = self.snapshot.bounded.as_mut()
+            && bounded.phase.is_enforcing()
+        {
+            bounded.phase = BoundedPlaybackPhase::Completed;
+            self.status = PlaybackStatus::Paused;
+            self.snapshot.transport = PlaybackTransport::Paused;
+            self.snapshot.play_failure = None;
+        }
+    }
+
+    pub fn bounded_failed(&mut self, failure: BoundedPlaybackFailure) {
+        if let Some(bounded) = self.snapshot.bounded.as_mut()
+            && bounded.phase.is_enforcing()
+        {
+            bounded.phase = BoundedPlaybackPhase::Failed(failure);
+            if self.snapshot.transport != PlaybackTransport::Playing {
+                self.snapshot.transport = PlaybackTransport::Paused;
+                self.status = PlaybackStatus::Paused;
+            }
+            self.snapshot.play_failure = None;
+        }
+    }
+
+    pub fn cancel_bounded(&mut self) {
+        self.snapshot.bounded = None;
     }
 
     pub fn selected_alternative(&self) -> Option<&PlaybackSourceAlternative> {
@@ -706,6 +861,7 @@ impl PlaybackLifecycle {
         self.snapshot.source = PlaybackSourceLifecycle::Loading;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::LoadingMetadata;
+        self.snapshot.bounded = None;
         self.clear_source_observations();
     }
 
@@ -714,6 +870,7 @@ impl PlaybackLifecycle {
         self.snapshot.source = PlaybackSourceLifecycle::Dormant;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
+        self.snapshot.bounded = None;
         self.clear_source_observations();
     }
 
@@ -880,6 +1037,7 @@ impl PlaybackLifecycle {
         self.status = PlaybackStatus::Ready;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.play_failure = None;
+        self.snapshot.bounded = None;
         Ok(())
     }
 
@@ -942,6 +1100,7 @@ impl PlaybackLifecycle {
         self.snapshot.source_failure = Some(failure);
         self.snapshot.alternative_failures = Arc::from([]);
         self.snapshot.play_failure = None;
+        self.snapshot.bounded = None;
         self.clear_attempt_observations();
     }
 
@@ -960,6 +1119,7 @@ impl PlaybackLifecycle {
         self.snapshot.source = PlaybackSourceLifecycle::Empty;
         self.snapshot.transport = PlaybackTransport::Idle;
         self.snapshot.readiness = PlaybackReadiness::Unavailable;
+        self.snapshot.bounded = None;
         self.clear_source_observations();
         if self.graph_backed && self.snapshot.graph != PlaybackGraphState::Unavailable {
             self.snapshot.graph = PlaybackGraphState::AwaitingSource;
@@ -1007,6 +1167,8 @@ pub struct AudioPlayerController {
     stop: Callback<(), Result<(), PlaybackCommandError>>,
     seek: Callback<Duration>,
     skip: Callback<f64>,
+    play_bounded_once: Callback<WaveformSelection, Result<(), PlaybackCommandError>>,
+    cancel_bounded: Callback<()>,
     set_rate: Callback<f64, Result<(), PlaybackCommandError>>,
     set_repeat: Callback<bool>,
     set_muted: Callback<bool>,
@@ -1074,6 +1236,22 @@ impl AudioPlayerController {
 
     pub fn skip(self, seconds: f64) {
         self.skip.call(seconds);
+    }
+
+    /// Pause-seek to a Waveform Selection and play it once.
+    ///
+    /// The selection is validated against the current source's authoritative
+    /// browser duration. Use [`Self::snapshot`] to observe the bounded lifecycle.
+    pub fn play_bounded_once(
+        self,
+        selection: WaveformSelection,
+    ) -> Result<(), PlaybackCommandError> {
+        self.play_bounded_once.call(selection)
+    }
+
+    /// Stop enforcing the current bounded range without clearing application selection state.
+    pub fn cancel_bounded_playback(self) {
+        self.cancel_bounded.call(());
     }
 
     pub fn set_rate(self, rate: f64) -> Result<(), PlaybackCommandError> {
@@ -1163,6 +1341,7 @@ fn use_unsupported_audio_player(
             source_failure: Some(PlaybackSourceFailure::Unsupported(error)),
             alternative_failures: Arc::from([]),
             play_failure: None,
+            bounded: None,
             repeat: preferences.repeat,
             muted: preferences.muted,
             audibility_level: preferences.audibility_level,
@@ -1178,6 +1357,11 @@ fn use_unsupported_audio_player(
         use_callback(|()| Err(PlaybackCommandError("audio playback is unsupported")));
     let seek = use_callback(|_: Duration| {});
     let skip = use_callback(|_: f64| {});
+    let play_bounded_once: Callback<WaveformSelection, Result<(), PlaybackCommandError>> =
+        use_callback(|_: WaveformSelection| {
+            Err(PlaybackCommandError("audio playback is unsupported"))
+        });
+    let cancel_bounded = use_callback(|()| {});
     let set_rate: Callback<f64, Result<(), PlaybackCommandError>> =
         use_callback(|_: f64| Err(PlaybackCommandError("audio playback is unsupported")));
     let mut snapshot_for_repeat = snapshot;
@@ -1202,6 +1386,8 @@ fn use_unsupported_audio_player(
         stop: unsupported,
         seek,
         skip,
+        play_bounded_once,
+        cancel_bounded,
         set_rate,
         set_repeat,
         set_muted,

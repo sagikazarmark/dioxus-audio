@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use dioxus::prelude::*;
+use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::playback::{
+    BoundedPlaybackFailure, BoundedPlaybackMode, BoundedPlaybackPhase,
     PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackGraphState, PlaybackLifecycle,
     PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackOptions, PlaybackPlayFailure,
     PlaybackReadiness, PlaybackSource, PlaybackSourceAlternative, PlaybackSourceCrossOrigin,
@@ -334,6 +336,106 @@ fn playback_reports_loading_and_pending_play_as_orthogonal_state() {
 }
 
 #[test]
+fn bounded_playback_rejects_a_missing_source_or_unplayable_selection() {
+    let playable = WaveformSelection::new(5.0, 10.0);
+    let mut playback = PlaybackLifecycle::default();
+
+    assert!(playback.start_bounded_once(playable, 30.0).is_err());
+    assert_eq!(playback.bounded(), None);
+
+    playback.loaded();
+    for (selection, duration) in [
+        (playable, 0.0),
+        (playable, f64::NAN),
+        (WaveformSelection::new(5.0, 5.0), 30.0),
+        (WaveformSelection::new(20.0, 31.0), 30.0),
+    ] {
+        assert!(playback.start_bounded_once(selection, duration).is_err());
+        assert_eq!(playback.bounded(), None);
+    }
+
+    playback.start_bounded_once(playable, 30.0).unwrap();
+    let bounded = playback.bounded().expect("bounded operation");
+    assert_eq!(bounded.range, playable);
+    assert_eq!(bounded.mode, BoundedPlaybackMode::Once);
+    assert_eq!(bounded.phase, BoundedPlaybackPhase::Seeking);
+}
+
+#[test]
+fn bounded_playback_waits_for_seek_and_play_confirmation_before_becoming_active() {
+    let selection = WaveformSelection::new(5.0, 10.0);
+    let mut playback = PlaybackLifecycle::default();
+    playback.loaded();
+    playback.start_bounded_once(selection, 30.0).unwrap();
+
+    playback.request_play().unwrap();
+    playback.bounded_activating();
+    assert_eq!(
+        playback.bounded().map(|bounded| bounded.phase),
+        Some(BoundedPlaybackPhase::Activating)
+    );
+    assert_eq!(playback.transport(), PlaybackTransport::PlayPending);
+
+    playback.playing();
+    playback.bounded_active();
+    assert_eq!(
+        playback.bounded().map(|bounded| bounded.phase),
+        Some(BoundedPlaybackPhase::Active)
+    );
+
+    playback.paused();
+    playback.bounded_paused();
+    assert_eq!(
+        playback.bounded().map(|bounded| bounded.phase),
+        Some(BoundedPlaybackPhase::Paused)
+    );
+    assert_eq!(playback.transport(), PlaybackTransport::Paused);
+
+    playback.request_play().unwrap();
+    playback.bounded_activating();
+    playback.playing();
+    playback.bounded_active();
+    playback.bounded_completed();
+    assert_eq!(
+        playback.bounded().map(|bounded| bounded.phase),
+        Some(BoundedPlaybackPhase::Completed)
+    );
+    assert_eq!(playback.transport(), PlaybackTransport::Paused);
+    assert_eq!(playback.status(), &PlaybackStatus::Paused);
+}
+
+#[test]
+fn bounded_failure_is_isolated_and_source_changes_clear_the_operation() {
+    let selection = WaveformSelection::new(5.0, 10.0);
+    let mut playback = PlaybackLifecycle::default();
+    playback.loaded();
+    playback.start_bounded_once(selection, 30.0).unwrap();
+
+    playback.bounded_failed(BoundedPlaybackFailure::SeekTimedOut);
+    assert_eq!(
+        playback.bounded().map(|bounded| bounded.phase),
+        Some(BoundedPlaybackPhase::Failed(
+            BoundedPlaybackFailure::SeekTimedOut
+        ))
+    );
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Playable);
+    assert_eq!(playback.source_failure(), None);
+    assert!(playback.request_play().is_ok());
+
+    playback.cancel_bounded();
+    assert_eq!(playback.bounded(), None);
+    playback.paused();
+    playback.start_bounded_once(selection, 30.0).unwrap();
+    playback.loading();
+    assert_eq!(playback.bounded(), None);
+
+    playback.loaded();
+    playback.start_bounded_once(selection, 30.0).unwrap();
+    playback.unload();
+    assert_eq!(playback.bounded(), None);
+}
+
+#[test]
 fn rejected_play_is_recoverable_without_failing_the_source() {
     let mut playback = PlaybackLifecycle::default();
     playback.loaded();
@@ -648,10 +750,11 @@ fn unsupported_playback_snapshot_is_neutral_for_server_rendering() {
         let source = use_signal(|| None::<PlaybackSource>);
         let player = use_audio_player(source.into(), Duration::from_secs(30));
         let snapshot = player.snapshot()();
+        let bounded = snapshot.bounded;
 
         rsx! {
             output {
-                "{snapshot.source:?}/{snapshot.transport:?}/{snapshot.readiness:?}"
+                "{snapshot.source:?}/{snapshot.transport:?}/{snapshot.readiness:?}/{bounded:?}"
             }
         }
     }
@@ -660,7 +763,7 @@ fn unsupported_playback_snapshot_is_neutral_for_server_rendering() {
     vdom.rebuild_in_place();
     let html = dioxus_ssr::render(&vdom);
 
-    assert!(html.contains("Empty/Idle/Unavailable"));
+    assert!(html.contains("Empty/Idle/Unavailable/None"));
 }
 
 #[test]

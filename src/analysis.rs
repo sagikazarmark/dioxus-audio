@@ -567,6 +567,9 @@ pub struct WaveformSelection {
     end: f64,
 }
 
+// Construction and mutation exclude NaN, so Waveform Selection has reflexive equality.
+impl Eq for WaveformSelection {}
+
 impl WaveformSelection {
     pub fn new(start: f64, end: f64) -> Self {
         let start = finite_non_negative(start);

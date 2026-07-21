@@ -13,9 +13,9 @@ use dioxus_audio::components::{
 };
 use dioxus_audio::playback::{
     PlaybackGraphState, PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackOptions,
-    PlaybackSource, PlaybackSourceAlternative, PlaybackSourceCrossOrigin,
-    PlaybackSourceFailure, PlaybackSourceFailureKind, PlaybackSourceLifecycle, PlaybackStatus,
-    PlaybackTimeRange, PlaybackTransport, use_audio_player, use_audio_player_with_options,
+    PlaybackSource, PlaybackSourceAlternative, PlaybackSourceCrossOrigin, PlaybackSourceFailure,
+    PlaybackSourceFailureKind, PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange,
+    PlaybackTransport, use_audio_player, use_audio_player_with_options,
 };
 
 /// Lazily generate a two-second WAV tone when the player asks for its bytes.

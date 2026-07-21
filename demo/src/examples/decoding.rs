@@ -193,8 +193,7 @@ fn generated_stereo_wav() -> AudioData {
     for frame in 0..SOURCE_FRAMES {
         let time = frame as f32 / ENCODED_SAMPLE_RATE as f32;
         for (frequency, amplitude) in [(220.0_f32, 0.2_f32), (440.0, 0.7)] {
-            let sample =
-                (time * frequency * std::f32::consts::TAU).sin() * amplitude;
+            let sample = (time * frequency * std::f32::consts::TAU).sin() * amplitude;
             let encoded = (sample * i16::MAX as f32) as i16;
             bytes.extend_from_slice(&encoded.to_le_bytes());
         }

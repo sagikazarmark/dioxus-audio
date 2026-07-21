@@ -192,8 +192,7 @@ fn RecorderPanel(
     });
 
     let status = recorder.status()();
-    let source_availability = recorder
-        .source_availability()()
+    let source_availability = recorder.source_availability()()
         .map(|availability| format!("{availability:?}"))
         .unwrap_or_else(|| "Unavailable".to_string());
     let completion_cause = match recorder.outcome()() {

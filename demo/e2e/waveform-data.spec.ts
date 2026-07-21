@@ -107,6 +107,18 @@ async function settleBoundedPlayback(page: import("@playwright/test").Page) {
   });
 }
 
+async function zoomToTwentySecondFollow(
+  viewport: import("@playwright/test").Locator,
+) {
+  const zoomIn = viewport.getByRole("button", { name: "Zoom in" });
+  const resume = viewport.getByRole("button", { name: "Resume follow" });
+  await expect(resume).toBeEnabled();
+  for (let index = 0; index < 6; index += 1) {
+    await zoomIn.click();
+    await resume.click();
+  }
+}
+
 test("Waveform Data preserves mode and channels in a narrow viewport", async ({
   openRoute,
   page,
@@ -166,36 +178,35 @@ test("long Waveforms have a complete native keyboard navigation path", async ({
     name: "Overview position",
   });
 
-  await expect(range).toHaveText("Visible 1:00:00 to 1:30:00");
-  await expect(viewport.getByRole("button")).toHaveCount(5);
+  await expect(range).toHaveText("Visible 0:00 to 21:20");
+  await expect(viewport.getByRole("button")).toHaveCount(6);
   await expect(overview).toBeEnabled();
   await expect(overview).toHaveAttribute(
     "aria-valuetext",
-    "Visible 1:00:00 to 1:30:00",
+    "Visible 0:00 to 21:20",
   );
 
   await zoomIn.focus();
   await zoomIn.press("Enter");
   await expect(zoomIn).toBeFocused();
-  await expect(range).toHaveText("Visible 1:07:30 to 1:22:30");
+  await expect(range).toHaveText("Visible 0:00 to 10:40");
 
   const panBackward = viewport.getByRole("button", { name: "Pan backward" });
-  await panBackward.focus();
-  await panBackward.press("Enter");
-  await expect(panBackward).toBeFocused();
-  await expect(range).toHaveText("Visible 1:00:00 to 1:15:00");
+  await expect(panBackward).toBeDisabled();
   await viewport.getByRole("button", { name: "Pan forward" }).press("Enter");
-  await expect(range).toHaveText("Visible 1:07:30 to 1:22:30");
+  await expect(range).toHaveText("Visible 5:20 to 16:00");
+  await panBackward.press("Enter");
+  await expect(range).toHaveText("Visible 0:00 to 10:40");
 
   await viewport.getByRole("button", { name: "Zoom out" }).press("Enter");
-  await expect(range).toHaveText("Visible 1:00:00 to 1:30:00");
+  await expect(range).toHaveText("Visible 0:00 to 21:20");
   await zoomIn.press("Enter");
-  await expect(range).toHaveText("Visible 1:07:30 to 1:22:30");
+  await expect(range).toHaveText("Visible 5:20 to 16:00");
 
   await overview.focus();
   await overview.press("End");
   await expect(overview).toBeFocused();
-  await expect(range).toHaveText("Visible 3:45:00 to 4:00:00");
+  await expect(range).toHaveText("Visible 3:49:20 to 4:00:00");
   await expect(
     viewport.getByRole("button", { name: "Pan forward" }),
   ).toBeDisabled();
@@ -204,6 +215,115 @@ test("long Waveforms have a complete native keyboard navigation path", async ({
   await expect(range).toHaveText("Visible 0:00 to 4:00:00");
   await expect(overview).toBeDisabled();
   await expect(viewport.getByRole("button", { name: "Zoom out" })).toBeDisabled();
+});
+
+test("long Waveforms follow Playback through a safe zone and resume explicitly", async ({
+  openRoute,
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await openRoute("/waveforms", "Preview and select waveform ranges");
+
+  const viewport = page.getByRole("group", {
+    name: "Four-hour stereo waveform",
+  });
+  const range = viewport.locator(".dioxus-audio__viewport-range");
+  const waveform = viewport.locator("svg.dioxus-audio__waveform-data");
+  const resume = viewport.getByRole("button", { name: "Resume follow" });
+  const position = page.getByRole("slider", { name: "Long Playback position" });
+
+  await zoomToTwentySecondFollow(viewport);
+  await expect(viewport).toHaveAttribute("data-following", "true");
+  await expect(position).toBeEnabled();
+  await position.fill("12");
+  await expect(range).toHaveText("Visible 0:00 to 0:20");
+  await expect(viewport.locator(".dioxus-audio__viewport-playhead")).toBeVisible();
+  const initialBuild = await waveform.getAttribute("data-geometry-build-count");
+
+  await position.fill("16");
+  await expect(range).toHaveText("Visible 0:11 to 0:31");
+  const followedBuild = await waveform.getAttribute("data-geometry-build-count");
+  expect(followedBuild).not.toBe(initialBuild);
+
+  await position.fill("17");
+  await expect(range).toHaveText("Visible 0:11 to 0:31");
+  await expect(waveform).toHaveAttribute(
+    "data-geometry-build-count",
+    followedBuild!,
+  );
+
+  await viewport.getByRole("button", { name: "Pan forward" }).press("Enter");
+  await expect(viewport).toHaveAttribute("data-following", "false");
+  await expect(range).toHaveText("Visible 0:21 to 0:41");
+  const manualBuild = await waveform.getAttribute("data-geometry-build-count");
+
+  await position.fill("80");
+  await expect(range).toHaveText("Visible 0:21 to 0:41");
+  await expect(waveform).toHaveAttribute("data-geometry-build-count", manualBuild!);
+
+  await resume.press("Enter");
+  await expect(viewport).toHaveAttribute("data-following", "true");
+  await expect(range).toHaveText("Visible 1:15 to 1:35");
+  await viewport.getByRole("button", { name: "Zoom in" }).press("Enter");
+  await expect(range).toHaveText("Visible 1:17.5 to 1:27.5");
+  await resume.press("Enter");
+  await viewport.getByRole("slider", { name: "Overview position" }).press("End");
+  await expect(viewport).toHaveAttribute("data-following", "false");
+});
+
+test("Playback replacement, duration changes, and unload clamp the followed playhead", async ({
+  openRoute,
+  page,
+}) => {
+  await capturePlaybackElements(page);
+  await openRoute("/waveforms", "Preview and select waveform ranges");
+
+  const viewport = page.getByRole("group", {
+    name: "Four-hour stereo waveform",
+  });
+  const range = viewport.locator(".dioxus-audio__viewport-range");
+  const position = page.getByRole("slider", { name: "Long Playback position" });
+  await expect(position).toBeEnabled();
+  await zoomToTwentySecondFollow(viewport);
+  await position.fill("100");
+  await expect(range).toHaveText("Visible 1:35 to 1:55");
+
+  await page.evaluate(() => {
+    const element = (window as BoundedPlaybackTestWindow).boundedPlaybackElements?.find(
+      (candidate) => candidate.duration > 100,
+    );
+    if (!element) throw new Error("long Playback element was not created");
+    Object.defineProperty(element, "duration", {
+      configurable: true,
+      get: () => 60,
+    });
+    element.dispatchEvent(new Event("durationchange"));
+  });
+  await expect(position).toHaveAttribute("max", "60");
+  await expect(range).toHaveText("Visible 0:55 to 1:15");
+
+  await page
+    .getByRole("button", { name: "Replace long Playback source" })
+    .click();
+  await expect(position).toHaveAttribute("max", "30");
+  await expect(position).toBeEnabled();
+  await expect(range).toHaveText("Visible 0:00 to 0:20");
+  await expect(viewport.locator(".dioxus-audio__viewport-playhead")).toBeVisible();
+  await position.fill("30");
+  await expect(range).toHaveText("Visible 0:25 to 0:45");
+  await expect(viewport.locator(".dioxus-audio__viewport-playhead")).toBeVisible();
+
+  const replacedElement = await page.evaluateHandle(() =>
+    (window as BoundedPlaybackTestWindow).boundedPlaybackElements?.at(-1),
+  );
+  await page.getByRole("button", { name: "Unload long Playback source" }).click();
+  await expect(viewport.locator(".dioxus-audio__viewport-playhead")).toHaveCount(0);
+  await replacedElement.evaluate((element) => {
+    if (!(element instanceof HTMLMediaElement)) return;
+    element.currentTime = 500;
+    element.dispatchEvent(new Event("timeupdate"));
+  });
+  await expect(range).toHaveText("Visible 0:25 to 0:45");
 });
 
 test("long Waveform resolution follows measured width within bounded geometry", async ({
@@ -266,18 +386,30 @@ test("long Waveform resolution follows measured width within bounded geometry", 
   const mobileBuckets = Number(await waveform.getAttribute("data-bucket-count"));
   expect(mobileResolution).toBeGreaterThan(desktopResolution);
   expect(mobileBuckets).toBeLessThanOrEqual(mobileBudget);
+  await expect(viewport.getByRole("button", { name: "Resume follow" })).toBeVisible();
+  await expect(viewport.locator(".dioxus-audio__viewport-playhead")).toBeVisible();
 
   const containment = await viewport.evaluate((element) => {
     const bounds = element.getBoundingClientRect();
     const parent = element.parentElement?.getBoundingClientRect();
     const svg = element.querySelector("svg")?.getBoundingClientRect();
+    const stage = element
+      .querySelector(".dioxus-audio__viewport-stage")
+      ?.getBoundingClientRect();
+    const playhead = element
+      .querySelector(".dioxus-audio__viewport-playhead")
+      ?.getBoundingClientRect();
     return (
       parent !== undefined &&
       svg !== undefined &&
+      stage !== undefined &&
+      playhead !== undefined &&
       bounds.left >= parent.left &&
       bounds.right <= parent.right &&
       svg.left >= bounds.left &&
-      svg.right <= bounds.right
+      svg.right <= bounds.right &&
+      playhead.left >= stage.left - 1 &&
+      playhead.right <= stage.right + 1
     );
   });
   expect(containment).toBe(true);

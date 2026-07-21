@@ -607,9 +607,13 @@ data intentionally counts as changed.
 For long sources, create a `WaveformViewportController` with
 `use_waveform_viewport` and pass it to `NavigableWaveform`. The Controller
 exposes the total duration and positive visible source-time range, plus clamped
-`pan`, `show_range`, `reset`, and explicit-anchor `zoom` commands. The composed
-component provides native pan, zoom, reset, and optional fixed-span overview
-controls with visible source-time text.
+`pan`, `show_range`, `reset`, and explicit-anchor `zoom` commands. It also
+exposes `is_following`, `follow_playback`, and `resume_follow`. Following keeps
+Playback inside a 15–75% safe zone and moves it toward 25% only after it leaves
+that zone. Manual pan, zoom, reset, show-range, and overview movement disable
+following until `resume_follow` is called. The composed component provides
+native pan, zoom, reset, resume-follow, and optional fixed-span overview controls
+with visible source-time text.
 
 ```rust
 use dioxus_audio::components::NavigableWaveform;
@@ -624,6 +628,7 @@ rsx! {
     NavigableWaveform {
         data,
         controller: viewport,
+        playback: player,
         fallback_bucket_budget: 512,
         label: "Episode waveform",
     }
@@ -637,6 +642,12 @@ channel. It selects only the intersecting borrowed range and renders one compact
 amplitude-mode-aware SVG path per channel. A sparse resolution ladder can still
 make the coarsest stored level exceed the requested budget; applications should
 include a suitably coarse long-form level when bounded geometry matters.
+When an `AudioPlayerController` is supplied, the component presents its visible
+playhead separately from SVG geometry and follows only playable, duration-bound
+positions. Position-only updates therefore do not rebuild channel paths. Zoom
+buttons anchor at a visible followed playhead and otherwise use the Viewport
+center. Viewport movement is immediate rather than animated, so the same stable
+controls and visible range text remain the complete reduced-motion keyboard path.
 
 `InteractiveWaveform` composes Waveform Data, an `AudioPlayerController`, and
 one controlled `WaveformSelection`. Playback position, selection start, and

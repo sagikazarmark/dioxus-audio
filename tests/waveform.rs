@@ -171,6 +171,106 @@ fn viewport_navigation_keeps_nanosecond_precision_far_into_a_long_source() {
 }
 
 #[test]
+fn viewport_follow_moves_playback_through_a_forward_safe_zone() {
+    fn app() -> Element {
+        let controller = use_waveform_viewport(
+            Duration::from_secs(100),
+            Some(Duration::from_secs(20)..Duration::from_secs(40)),
+        );
+
+        let observations = use_hook(move || {
+            let mut observations = controller.is_following().to_string();
+
+            controller.follow_playback(Duration::from_secs(34));
+            let inside = controller.visible_range();
+            observations.push_str(&format!(
+                "|{}-{}",
+                inside.start.as_secs(),
+                inside.end.as_secs()
+            ));
+
+            controller.follow_playback(Duration::from_secs(36));
+            let forward = controller.visible_range();
+            observations.push_str(&format!(
+                "|{}-{}",
+                forward.start.as_secs(),
+                forward.end.as_secs()
+            ));
+
+            controller.follow_playback(Duration::from_secs(100));
+            let end = controller.visible_range();
+            observations.push_str(&format!("|{}-{}", end.start.as_secs(), end.end.as_secs()));
+            observations
+        });
+
+        rsx! { output { "{observations}" } }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+    assert!(html.contains("true|20-40|31-51|80-100"), "{html}");
+}
+
+#[test]
+fn manual_navigation_stays_unfollowed_until_follow_is_explicitly_resumed() {
+    fn app() -> Element {
+        let controller = use_waveform_viewport(
+            Duration::from_secs(100),
+            Some(Duration::from_secs(20)..Duration::from_secs(40)),
+        );
+
+        let observations = use_hook(move || {
+            controller.pan(0.5);
+            controller.follow_playback(Duration::from_secs(90));
+            let manually_panned = controller.visible_range();
+            let mut observations = format!(
+                "{}:{}-{}",
+                controller.is_following(),
+                manually_panned.start.as_secs(),
+                manually_panned.end.as_secs()
+            );
+
+            controller.resume_follow(Duration::from_secs(90));
+            let resumed = controller.visible_range();
+            observations.push_str(&format!(
+                "|{}:{}-{}",
+                controller.is_following(),
+                resumed.start.as_secs(),
+                resumed.end.as_secs()
+            ));
+
+            controller.zoom(2.0, Duration::from_secs(90));
+            observations.push_str(&format!("|{}", controller.is_following()));
+            controller.resume_follow(Duration::ZERO);
+            let start = controller.visible_range();
+            observations.push_str(&format!(
+                "|{}:{}-{}",
+                controller.is_following(),
+                start.start.as_secs(),
+                start.end.as_secs()
+            ));
+            controller.show_range(Duration::from_secs(20)..Duration::from_secs(30));
+            observations.push_str(&format!("|{}", controller.is_following()));
+            controller.resume_follow(Duration::from_secs(25));
+            controller.reset();
+            observations.push_str(&format!("|{}", controller.is_following()));
+            observations
+        });
+
+        rsx! { output { "{observations}" } }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+    assert!(
+        html.contains("false:30-50|true:80-100|false|true:0-10|false|false"),
+        "{html}"
+    );
+}
+
+#[test]
 fn magnitude_data_preserves_multichannel_buckets_and_snapshot_identity() {
     let data = WaveformData::from_magnitudes(
         Duration::from_secs(4),

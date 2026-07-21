@@ -629,13 +629,14 @@ fn navigable_waveform_has_hydration_stable_controls_range_text_and_fallback_budg
         html.contains("aria-label=\"Long stereo recording\""),
         "{html}"
     );
-    assert_eq!(html.matches("type=\"button\"").count(), 5, "{html}");
+    assert_eq!(html.matches("type=\"button\"").count(), 6, "{html}");
     for label in [
         "Pan backward",
         "Zoom out",
         "Reset view",
         "Zoom in",
         "Pan forward",
+        "Resume follow",
     ] {
         assert!(html.contains(&format!("aria-label=\"{label}\"")), "{html}");
     }
@@ -648,6 +649,8 @@ fn navigable_waveform_has_hydration_stable_controls_range_text_and_fallback_budg
     );
     assert!(html.contains("data-bucket-budget=37"), "{html}");
     assert!(html.contains("data-budget-source=\"fallback\""), "{html}");
+    assert!(html.contains("data-following=true"), "{html}");
+    assert!(html.contains("data-geometry-build-count=1"), "{html}");
     assert_eq!(html.matches("<path").count(), 2, "{html}");
     assert_eq!(html.matches("<rect").count(), 0, "{html}");
     assert!(!html.contains("aria-live"), "{html}");

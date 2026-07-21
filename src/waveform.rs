@@ -8,6 +8,9 @@ use std::time::Duration;
 use dioxus::prelude::*;
 
 const MINIMUM_VIEWPORT_SPAN: Duration = Duration::from_nanos(1);
+const FOLLOW_SAFE_ZONE_START_PERCENT: u128 = 15;
+const FOLLOW_SAFE_ZONE_END_PERCENT: u128 = 75;
+const FOLLOW_TARGET_PERCENT: u128 = 25;
 
 /// An observable, source-time Waveform Viewport and its navigation commands.
 ///
@@ -24,6 +27,7 @@ pub struct WaveformViewportController {
 struct WaveformViewportState {
     total_duration: Duration,
     visible: Range<Duration>,
+    following: bool,
 }
 
 impl WaveformViewportController {
@@ -37,6 +41,51 @@ impl WaveformViewportController {
         self.state.read().visible.clone()
     }
 
+    /// Whether Playback position updates currently move the Viewport.
+    pub fn is_following(self) -> bool {
+        self.state.read().following
+    }
+
+    /// Keep Playback within the Viewport's forward safe zone while following.
+    ///
+    /// Positions inside the 15–75% safe zone do not move the Viewport. Once a
+    /// position leaves it, the Viewport moves to place Playback at 25% unless a
+    /// source boundary intervenes. Positions beyond the source are clamped.
+    pub fn follow_playback(mut self, position: Duration) {
+        let state = self.state.read();
+        if !state.following {
+            return;
+        }
+        let visible = state.visible.clone();
+        let total_duration = state.total_duration;
+        drop(state);
+
+        let span_nanos = (visible.end - visible.start).as_nanos();
+        let start_nanos = visible.start.as_nanos();
+        let position_nanos = position.min(total_duration).as_nanos();
+        let safe_start = start_nanos + scaled_nanos(span_nanos, FOLLOW_SAFE_ZONE_START_PERCENT);
+        let safe_end = start_nanos + scaled_nanos(span_nanos, FOLLOW_SAFE_ZONE_END_PERCENT);
+        if (safe_start..=safe_end).contains(&position_nanos) {
+            return;
+        }
+
+        let target_offset = scaled_nanos(span_nanos, FOLLOW_TARGET_PERCENT);
+        let maximum_start = (total_duration - (visible.end - visible.start)).as_nanos();
+        let next_start = position_nanos
+            .saturating_sub(target_offset)
+            .min(maximum_start);
+        if next_start != start_nanos {
+            let next_start = duration_from_nanos(next_start);
+            self.state.write().visible = next_start..next_start + (visible.end - visible.start);
+        }
+    }
+
+    /// Resume following Playback and immediately reveal its current position.
+    pub fn resume_follow(mut self, position: Duration) {
+        self.state.write().following = true;
+        self.follow_playback(position);
+    }
+
     /// Move by a fraction of the current visible span.
     pub fn pan(mut self, fraction: f64) {
         if !fraction.is_finite() {
@@ -44,6 +93,7 @@ impl WaveformViewportController {
         }
 
         let mut state = self.state.write();
+        state.following = false;
         let span = state.visible.end - state.visible.start;
         let current_start = state.visible.start.as_nanos();
         let maximum_start = (state.total_duration - span).as_nanos();
@@ -66,12 +116,14 @@ impl WaveformViewportController {
     /// positive interval at its requested start.
     pub fn show_range(mut self, range: Range<Duration>) {
         let mut state = self.state.write();
+        state.following = false;
         state.visible = clamp_viewport_range(state.total_duration, range);
     }
 
     /// Restore the complete source duration.
     pub fn reset(mut self) {
         let mut state = self.state.write();
+        state.following = false;
         state.visible = Duration::ZERO..state.total_duration;
     }
 
@@ -85,6 +137,7 @@ impl WaveformViewportController {
         }
 
         let mut state = self.state.write();
+        state.following = false;
         let old_start = state.visible.start.as_nanos();
         let old_end = state.visible.end.as_nanos();
         let old_span = old_end - old_start;
@@ -118,6 +171,7 @@ pub fn use_waveform_viewport(
         visible: initial_visible
             .map(|range| clamp_viewport_range(total_duration, range))
             .unwrap_or(Duration::ZERO..total_duration),
+        following: true,
     });
     WaveformViewportController { state }
 }
@@ -136,6 +190,10 @@ fn clamp_viewport_range(total_duration: Duration, range: Range<Duration>) -> Ran
 
 fn rounded_nanos_clamped(nanos: f64, maximum: u128) -> u128 {
     (nanos.round().clamp(0.0, maximum as f64) as u128).min(maximum)
+}
+
+fn scaled_nanos(nanos: u128, percent: u128) -> u128 {
+    nanos / 100 * percent + nanos % 100 * percent / 100
 }
 
 /// The amplitude interpretation shared by every resolution in Waveform Data.

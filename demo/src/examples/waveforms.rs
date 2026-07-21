@@ -4,8 +4,8 @@ use dioxus::prelude::*;
 use dioxus_audio::AudioData;
 use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::components::{
-    InteractiveWaveform, NavigableWaveform, PlaybackStatusAnnouncer, Waveform, WaveformPreview,
-    WaveformRangeSelector,
+    InteractiveWaveform, NavigableWaveform, PlaybackSeekSlider, PlaybackStatusAnnouncer, Waveform,
+    WaveformPreview, WaveformRangeSelector,
 };
 use dioxus_audio::playback::{
     BoundedPlaybackFailure, BoundedPlaybackMode, BoundedPlaybackPhase, PlaybackSource,
@@ -27,8 +27,11 @@ pub fn WaveformsExample() -> Element {
     let long_form = long_form();
     let long_form_controller = use_waveform_viewport(
         long_form.duration(),
-        Some(Duration::from_secs(60 * 60)..Duration::from_secs(90 * 60)),
+        Some(Duration::ZERO..Duration::from_secs(1_280)),
     );
+    let mut long_form_source =
+        use_signal(|| Some(PlaybackSource::from(generated_audio(120, 220.0))));
+    let long_form_playback = use_audio_player(long_form_source.into(), Duration::from_secs(120));
     let mut selection = use_signal(|| WaveformSelection::new(2.16, 9.84));
     let selected = selection();
     let mut interactive_selection = use_signal(|| WaveformSelection::new(2.25, 9.5));
@@ -52,12 +55,33 @@ pub fn WaveformsExample() -> Element {
                 NavigableWaveform {
                     data: long_form,
                     controller: long_form_controller,
+                    playback: long_form_playback,
                     fallback_bucket_budget: 64,
                     height: 120.0,
                     label: "Four-hour stereo waveform".to_string(),
                 }
+                PlaybackSeekSlider {
+                    controller: long_form_playback,
+                    label: "Long Playback position".to_string(),
+                }
+                div { class: "mt-3 flex flex-wrap justify-center gap-2",
+                    button {
+                        class: "btn btn-sm btn-outline",
+                        r#type: "button",
+                        onclick: move |_| {
+                            long_form_source.set(Some(PlaybackSource::from(generated_audio(30, 247.0))));
+                        },
+                        "Replace long Playback source"
+                    }
+                    button {
+                        class: "btn btn-sm btn-outline",
+                        r#type: "button",
+                        onclick: move |_| long_form_source.set(None),
+                        "Unload long Playback source"
+                    }
+                }
                 p { class: "mt-3 text-xs text-base-content/55",
-                    "Four source-time resolutions; measured width selects bounded compact path geometry after the stable fallback render."
+                    "Playback follows through a forward safe zone; manual navigation pauses follow until it is explicitly resumed."
                 }
             }
             div {

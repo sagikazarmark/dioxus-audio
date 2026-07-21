@@ -10,7 +10,7 @@ pub fn Waveforms() -> Element {
         PageHeader {
             eyebrow: "Processing",
             title: "Preview and select waveform ranges",
-            intro: "Navigate measured long-form Waveform Data, render duration-aware magnitude or signed multichannel shapes, then seek Playback, edit a controlled Waveform Selection, and play or loop a valid selection.",
+            intro: "Follow Playback through measured long-form Waveform Data, pause following with manual navigation, resume it explicitly, then seek Playback, edit a controlled Waveform Selection, and play or loop a valid selection.",
         }
         ExampleSection {
             title: "Waveform components",
@@ -20,7 +20,7 @@ pub fn Waveforms() -> Element {
                 InlineCode { "Waveform" }
                 " selects a stored resolution by bucket budget and renders each channel without discarding signed shape. "
                 InlineCode { "NavigableWaveform" }
-                " combines a source-time Waveform Viewport Controller, measured resolution budget, compact channel paths, native navigation buttons, and an optional overview slider. "
+                " combines a source-time Waveform Viewport Controller, measured resolution budget, isolated Playback playhead, native follow and navigation buttons, and an optional overview slider. Position-only updates do not reconstruct channel geometry, and immediate movement preserves the reduced-motion keyboard path. "
                 InlineCode { "WaveformRangeSelector" }
                 " reports an ordered selection in source seconds. "
                 InlineCode { "InteractiveWaveform" }

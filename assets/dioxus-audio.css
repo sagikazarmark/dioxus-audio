@@ -81,6 +81,21 @@
   gap: 0.75rem;
 }
 
+.dioxus-audio__viewport-stage {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.dioxus-audio__viewport-playhead {
+  position: absolute;
+  inset-block: 0;
+  width: 2px;
+  pointer-events: none;
+  background: var(--_dxa-error);
+  transform: translateX(-1px);
+}
+
 .dioxus-audio__viewport-range {
   color: color-mix(in srgb, var(--_dxa-content) 72%, transparent);
   font-size: 0.8125rem;

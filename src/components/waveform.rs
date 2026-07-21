@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
@@ -56,7 +58,10 @@ fn WaveformSvg(
     height: f64,
     label: Option<String>,
 ) -> Element {
+    let geometry_builds = use_hook(|| Rc::new(Cell::new(0_usize)));
+    let geometry_builds_for_memo = geometry_builds.clone();
     let geometry = use_memo(use_reactive!(|(data, visible, bucket_budget, height)| {
+        geometry_builds_for_memo.set(geometry_builds_for_memo.get() + 1);
         build_waveform_geometry(&data, visible, bucket_budget, height)
     }));
     let geometry = geometry();
@@ -73,6 +78,7 @@ fn WaveformSvg(
             "data-resolution": geometry.resolution,
             "data-bucket-count": geometry.bucket_count,
             "data-bucket-budget": bucket_budget,
+            "data-geometry-build-count": geometry_builds.get(),
             width: "100%",
             height: "{height}",
             view_box: "{geometry.view_start} 0 {geometry.view_span} {height}",
@@ -214,6 +220,7 @@ struct WaveformMeasurement {
 pub fn NavigableWaveform(
     data: WaveformData,
     controller: WaveformViewportController,
+    #[props(default)] playback: Option<AudioPlayerController>,
     #[props(default = 512)] fallback_bucket_budget: usize,
     #[props(default = 96.0)] height: f64,
     #[props(default = true)] show_overview: bool,
@@ -231,10 +238,39 @@ pub fn NavigableWaveform(
         measured: false,
     });
     let current_measurement = measurement();
+    let total_duration = controller.total_duration();
+    let playback_position = playback.and_then(|playback| {
+        let source = playback.snapshot()().source;
+        let playback_duration = playback.duration()();
+        (matches!(source, PlaybackSourceLifecycle::Playable) && !playback_duration.is_zero()).then(
+            || {
+                playback.position()()
+                    .min(playback_duration)
+                    .min(total_duration)
+            },
+        )
+    });
+    use_effect(use_reactive!(|(playback_position, controller)| {
+        if let Some(position) = playback_position {
+            controller.follow_playback(position);
+        }
+    }));
     let visible = controller.visible_range();
     let span = visible.end - visible.start;
     let center = visible.start + span / 2;
-    let total_duration = controller.total_duration();
+    let following = controller.is_following();
+    let visible_playback = playback_position.filter(|position| {
+        *position >= visible.start
+            && (*position < visible.end
+                || (*position == total_duration && visible.end == total_duration))
+    });
+    let zoom_anchor = if following {
+        visible_playback.unwrap_or(center)
+    } else {
+        center
+    };
+    let playhead_percent = visible_playback
+        .map(|position| (position - visible.start).as_secs_f64() / span.as_secs_f64() * 100.0);
     let visible_text = format_visible_range(&visible);
     let at_start = visible.start.is_zero();
     let at_end = visible.end == total_duration;
@@ -256,6 +292,7 @@ pub fn NavigableWaveform(
             role: "group",
             aria_label: label,
             "data-budget-source": budget_source,
+            "data-following": following,
             onresize: move |event| {
                 let Ok(size) = event.data().get_content_box_size() else {
                     return;
@@ -271,12 +308,21 @@ pub fn NavigableWaveform(
                     measurement.set(next);
                 }
             },
-            WaveformSvg {
-                data: render_data,
-                visible: visible.clone(),
-                bucket_budget: current_measurement.bucket_budget,
-                height,
-                label: None,
+            div { class: "dioxus-audio__viewport-stage",
+                WaveformSvg {
+                    data: render_data,
+                    visible: visible.clone(),
+                    bucket_budget: current_measurement.bucket_budget,
+                    height,
+                    label: None,
+                }
+                if let Some(playhead_percent) = playhead_percent {
+                    div {
+                        class: "dioxus-audio__viewport-playhead",
+                        style: "left: {playhead_percent}%",
+                        aria_hidden: "true",
+                    }
+                }
             }
             output {
                 class: "dioxus-audio__viewport-range",
@@ -298,7 +344,7 @@ pub fn NavigableWaveform(
                     r#type: "button",
                     aria_label: "Zoom out",
                     disabled: fully_zoomed_out,
-                    onclick: move |_| controller.zoom(0.5, center),
+                    onclick: move |_| controller.zoom(0.5, zoom_anchor),
                     "Zoom out"
                 }
                 button {
@@ -314,7 +360,7 @@ pub fn NavigableWaveform(
                     r#type: "button",
                     aria_label: "Zoom in",
                     disabled: fully_zoomed_in,
-                    onclick: move |_| controller.zoom(2.0, center),
+                    onclick: move |_| controller.zoom(2.0, zoom_anchor),
                     "Zoom in"
                 }
                 button {
@@ -324,6 +370,18 @@ pub fn NavigableWaveform(
                     disabled: at_end,
                     onclick: move |_| controller.pan(0.5),
                     "Pan forward"
+                }
+                button {
+                    class: "dioxus-audio__viewport-control",
+                    r#type: "button",
+                    aria_label: "Resume follow",
+                    disabled: playback_position.is_none(),
+                    onclick: move |_| {
+                        if let Some(position) = playback_position {
+                            controller.resume_follow(position);
+                        }
+                    },
+                    "Resume follow"
                 }
             }
             if show_overview {

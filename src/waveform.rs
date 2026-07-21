@@ -5,6 +5,139 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dioxus::prelude::*;
+
+const MINIMUM_VIEWPORT_SPAN: Duration = Duration::from_nanos(1);
+
+/// An observable, source-time Waveform Viewport and its navigation commands.
+///
+/// Create this Controller with [`use_waveform_viewport`]. Pan distances are
+/// expressed as fractions of the current visible span. Zoom factors greater
+/// than one zoom in, and the supplied source-time anchor remains at the same
+/// relative position whenever source boundaries permit it.
+#[derive(Clone, Copy, PartialEq)]
+pub struct WaveformViewportController {
+    state: Signal<WaveformViewportState>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WaveformViewportState {
+    total_duration: Duration,
+    visible: Range<Duration>,
+}
+
+impl WaveformViewportController {
+    /// The complete source duration.
+    pub fn total_duration(self) -> Duration {
+        self.state.read().total_duration
+    }
+
+    /// The current positive, half-open visible source-time interval.
+    pub fn visible_range(self) -> Range<Duration> {
+        self.state.read().visible.clone()
+    }
+
+    /// Move by a fraction of the current visible span.
+    pub fn pan(mut self, fraction: f64) {
+        if !fraction.is_finite() {
+            return;
+        }
+
+        let mut state = self.state.write();
+        let span = state.visible.end - state.visible.start;
+        let current_start = state.visible.start.as_nanos();
+        let maximum_start = (state.total_duration - span).as_nanos();
+        let distance = span.as_nanos() as f64 * fraction.abs();
+        let start_nanos = if fraction.is_sign_negative() {
+            current_start.saturating_sub(rounded_nanos_clamped(distance, current_start))
+        } else {
+            current_start.saturating_add(rounded_nanos_clamped(
+                distance,
+                maximum_start - current_start,
+            ))
+        };
+        let start = duration_from_nanos(start_nanos);
+        state.visible = start..start + span;
+    }
+
+    /// Present a requested source-time interval after clamping it to the source.
+    ///
+    /// A collapsed or reversed request becomes the smallest representable
+    /// positive interval at its requested start.
+    pub fn show_range(mut self, range: Range<Duration>) {
+        let mut state = self.state.write();
+        state.visible = clamp_viewport_range(state.total_duration, range);
+    }
+
+    /// Restore the complete source duration.
+    pub fn reset(mut self) {
+        let mut state = self.state.write();
+        state.visible = Duration::ZERO..state.total_duration;
+    }
+
+    /// Zoom by `factor` around an explicit source-time anchor.
+    ///
+    /// Invalid or non-positive factors leave the Viewport unchanged. Extreme
+    /// factors clamp between one nanosecond and the complete source duration.
+    pub fn zoom(mut self, factor: f64, anchor: Duration) {
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+
+        let mut state = self.state.write();
+        let old_start = state.visible.start.as_nanos();
+        let old_end = state.visible.end.as_nanos();
+        let old_span = old_end - old_start;
+        let anchor = anchor.as_nanos().clamp(old_start, old_end);
+        let anchor_fraction = (anchor - old_start) as f64 / old_span as f64;
+        let total_nanos = state.total_duration.as_nanos();
+        let new_span_nanos = rounded_nanos_clamped(old_span as f64 / factor, total_nanos).max(1);
+        let maximum_start = total_nanos - new_span_nanos;
+        let new_anchor_offset =
+            rounded_nanos_clamped(new_span_nanos as f64 * anchor_fraction, new_span_nanos);
+        let new_start_nanos = anchor.saturating_sub(new_anchor_offset).min(maximum_start);
+        state.visible = duration_from_nanos(new_start_nanos)
+            ..duration_from_nanos(new_start_nanos + new_span_nanos);
+    }
+}
+
+/// Create a Waveform Viewport Controller with hydration-stable initial state.
+///
+/// `total_duration` must be positive. The optional initial range is clamped to
+/// that duration; omitting it presents the complete source.
+pub fn use_waveform_viewport(
+    total_duration: Duration,
+    initial_visible: Option<Range<Duration>>,
+) -> WaveformViewportController {
+    assert!(
+        !total_duration.is_zero(),
+        "Waveform Viewport duration must be positive"
+    );
+    let state = use_signal(move || WaveformViewportState {
+        total_duration,
+        visible: initial_visible
+            .map(|range| clamp_viewport_range(total_duration, range))
+            .unwrap_or(Duration::ZERO..total_duration),
+    });
+    WaveformViewportController { state }
+}
+
+fn clamp_viewport_range(total_duration: Duration, range: Range<Duration>) -> Range<Duration> {
+    let requested_span = range
+        .end
+        .checked_sub(range.start)
+        .filter(|span| !span.is_zero())
+        .unwrap_or(MINIMUM_VIEWPORT_SPAN);
+    let span = requested_span.min(total_duration);
+    let maximum_start = total_duration - span;
+    let start = range.start.min(maximum_start);
+    start..start + span
+}
+
+fn rounded_nanos_clamped(nanos: f64, maximum: u128) -> u128 {
+    (nanos.round().clamp(0.0, maximum as f64) as u128).min(maximum)
+}
+
 /// The amplitude interpretation shared by every resolution in Waveform Data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AmplitudeMode {

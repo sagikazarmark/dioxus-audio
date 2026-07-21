@@ -4,14 +4,14 @@ use dioxus::prelude::*;
 use dioxus_audio::AudioData;
 use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::components::{
-    InteractiveWaveform, PlaybackStatusAnnouncer, Waveform, WaveformPreview,
+    InteractiveWaveform, NavigableWaveform, PlaybackStatusAnnouncer, Waveform, WaveformPreview,
     WaveformRangeSelector,
 };
 use dioxus_audio::playback::{
     BoundedPlaybackFailure, BoundedPlaybackMode, BoundedPlaybackPhase, PlaybackSource,
     PlaybackSourceLifecycle, PlaybackTransport, use_audio_player,
 };
-use dioxus_audio::waveform::{SignedEnvelope, WaveformData, WaveformLevel};
+use dioxus_audio::waveform::{SignedEnvelope, WaveformData, WaveformLevel, use_waveform_viewport};
 
 /// Render compact Peaks and edit a source-time range over the same data.
 #[component]
@@ -23,6 +23,12 @@ pub fn WaveformsExample() -> Element {
     let short_waveform = WaveformData::from_peaks(Duration::from_secs(4), peaks.clone())
         .expect("sample Peaks form valid short Waveform Data");
     let signed_stereo = signed_stereo_data();
+    let long_form = use_memo(four_hour_signed_stereo_data);
+    let long_form = long_form();
+    let long_form_controller = use_waveform_viewport(
+        long_form.duration(),
+        Some(Duration::from_secs(60 * 60)..Duration::from_secs(90 * 60)),
+    );
     let mut selection = use_signal(|| WaveformSelection::new(2.16, 9.84));
     let selected = selection();
     let mut interactive_selection = use_signal(|| WaveformSelection::new(2.25, 9.5));
@@ -41,6 +47,19 @@ pub fn WaveformsExample() -> Element {
 
     rsx! {
         div { class: "grid gap-6",
+            div { class: "min-w-0 rounded-2xl border border-base-300 bg-base-100 p-4",
+                p { class: "mb-2 text-xs font-semibold uppercase tracking-wider text-base-content/45", "Four-hour navigable stereo waveform" }
+                NavigableWaveform {
+                    data: long_form,
+                    controller: long_form_controller,
+                    fallback_bucket_budget: 64,
+                    height: 120.0,
+                    label: "Four-hour stereo waveform".to_string(),
+                }
+                p { class: "mt-3 text-xs text-base-content/55",
+                    "Four source-time resolutions; measured width selects bounded compact path geometry after the stable fallback render."
+                }
+            }
             div {
                 p { class: "mb-2 text-xs font-semibold uppercase tracking-wider text-base-content/45", "Magnitude from Peaks" }
                 Waveform {
@@ -372,6 +391,48 @@ fn signed_stereo_data() -> WaveformData {
         ],
     )
     .expect("sample signed envelopes form valid Waveform Data")
+}
+
+fn four_hour_signed_stereo_data() -> WaveformData {
+    let duration = Duration::from_secs(4 * 60 * 60);
+    WaveformData::from_signed_envelopes(
+        duration,
+        2,
+        vec![
+            WaveformLevel::new(
+                Duration::from_millis(250),
+                long_signed_stereo_buckets(57_600),
+            ),
+            WaveformLevel::new(Duration::from_secs(1), long_signed_stereo_buckets(14_400)),
+            WaveformLevel::new(Duration::from_secs(5), long_signed_stereo_buckets(2_880)),
+            WaveformLevel::new(Duration::from_secs(30), long_signed_stereo_buckets(480)),
+        ],
+    )
+    .expect("representative long-form envelopes form valid Waveform Data")
+}
+
+fn long_signed_stereo_buckets(bucket_count: usize) -> Vec<SignedEnvelope> {
+    let mut buckets = Vec::with_capacity(bucket_count * 2);
+    for channel in 0..2 {
+        for index in 0..bucket_count {
+            let primary = (index as f32 * 0.013 + channel as f32 * 0.7).sin();
+            let detail = (index as f32 * 0.071).cos() * 0.16;
+            let upper = (0.2 + primary.abs() * 0.65 + detail).clamp(0.05, 0.95);
+            let lower = (0.15 + primary.abs() * 0.5 - detail).clamp(0.05, 0.9);
+            buckets.push(if channel == 0 {
+                SignedEnvelope {
+                    min: -lower * 0.55,
+                    max: upper,
+                }
+            } else {
+                SignedEnvelope {
+                    min: -lower,
+                    max: upper * 0.6,
+                }
+            });
+        }
+    }
+    buckets
 }
 
 fn signed_stereo_buckets(bucket_count: usize) -> Vec<SignedEnvelope> {

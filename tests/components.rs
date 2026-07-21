@@ -2,19 +2,19 @@ use dioxus::prelude::*;
 use dioxus_audio::analysis::{LiveAnalysisOptions, WaveformSelection, use_live_analysis};
 use dioxus_audio::components::{
     AudioInputSelector, AudioPlayer, AudioScrubber, InteractiveWaveform, LevelMeter, LiveWaveform,
-    MicrophoneStatusIndicator, PlaybackAnnouncementLabels, PlaybackAudibilitySlider,
-    PlaybackMuteButton, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton,
-    PlaybackSeekSlider, PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton,
-    RecorderAnnouncementLabels, RecorderCancelButton, RecorderClearButton, RecorderControls,
-    RecorderPauseResumeButton, RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton,
-    SpectrumVisualizer, Waveform, WaveformPreview, WaveformRangeSelector,
+    MicrophoneStatusIndicator, NavigableWaveform, PlaybackAnnouncementLabels,
+    PlaybackAudibilitySlider, PlaybackMuteButton, PlaybackPlayPauseButton, PlaybackRateButton,
+    PlaybackRepeatButton, PlaybackSeekSlider, PlaybackSkipButton, PlaybackStatusAnnouncer,
+    PlaybackStopButton, RecorderAnnouncementLabels, RecorderCancelButton, RecorderClearButton,
+    RecorderControls, RecorderPauseResumeButton, RecorderStartButton, RecorderStatusAnnouncer,
+    RecorderStopButton, SpectrumVisualizer, Waveform, WaveformPreview, WaveformRangeSelector,
 };
 use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
 use dioxus_audio::playback::{PlaybackSource, use_audio_player};
 use dioxus_audio::recorder::{
     MicrophoneStatus, RecorderOptions, RecorderStatus, use_audio_recorder,
 };
-use dioxus_audio::waveform::{SignedEnvelope, WaveformData, WaveformLevel};
+use dioxus_audio::waveform::{SignedEnvelope, WaveformData, WaveformLevel, use_waveform_viewport};
 use std::time::Duration;
 
 #[test]
@@ -558,4 +558,173 @@ fn waveform_data_keeps_signed_envelopes_visually_distinct_from_magnitudes() {
     );
     assert!(magnitude_html.contains("aria-hidden=true"));
     assert!(signed_html.contains("aria-hidden=true"));
+}
+
+#[test]
+fn navigable_waveform_has_hydration_stable_controls_range_text_and_fallback_budget() {
+    fn app() -> Element {
+        let data = WaveformData::from_signed_envelopes(
+            Duration::from_secs(4 * 60 * 60),
+            2,
+            vec![WaveformLevel::new(
+                Duration::from_secs(60 * 60),
+                vec![
+                    SignedEnvelope {
+                        min: -0.8,
+                        max: 0.2,
+                    },
+                    SignedEnvelope {
+                        min: -0.4,
+                        max: 0.9,
+                    },
+                    SignedEnvelope {
+                        min: -0.6,
+                        max: 0.5,
+                    },
+                    SignedEnvelope {
+                        min: -0.2,
+                        max: 0.7,
+                    },
+                    SignedEnvelope {
+                        min: -0.3,
+                        max: 0.8,
+                    },
+                    SignedEnvelope {
+                        min: -0.9,
+                        max: 0.4,
+                    },
+                    SignedEnvelope {
+                        min: -0.5,
+                        max: 0.6,
+                    },
+                    SignedEnvelope {
+                        min: -0.7,
+                        max: 0.3,
+                    },
+                ],
+            )],
+        )
+        .unwrap();
+        let controller = use_waveform_viewport(
+            data.duration(),
+            Some(Duration::from_secs(60 * 60)..Duration::from_secs(90 * 60)),
+        );
+
+        rsx! {
+            NavigableWaveform {
+                data,
+                controller,
+                fallback_bucket_budget: 37,
+                label: "Long stereo recording".to_string(),
+            }
+        }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+
+    assert!(html.contains("role=\"group\""), "{html}");
+    assert!(
+        html.contains("aria-label=\"Long stereo recording\""),
+        "{html}"
+    );
+    assert_eq!(html.matches("type=\"button\"").count(), 5, "{html}");
+    for label in [
+        "Pan backward",
+        "Zoom out",
+        "Reset view",
+        "Zoom in",
+        "Pan forward",
+    ] {
+        assert!(html.contains(&format!("aria-label=\"{label}\"")), "{html}");
+    }
+    assert!(html.contains("Visible 1:00:00 to 1:30:00"), "{html}");
+    assert_eq!(html.matches("type=\"range\"").count(), 1, "{html}");
+    assert!(html.contains("aria-label=\"Overview position\""), "{html}");
+    assert!(
+        html.contains("aria-valuetext=\"Visible 1:00:00 to 1:30:00\""),
+        "{html}"
+    );
+    assert!(html.contains("data-bucket-budget=37"), "{html}");
+    assert!(html.contains("data-budget-source=\"fallback\""), "{html}");
+    assert_eq!(html.matches("<path").count(), 2, "{html}");
+    assert_eq!(html.matches("<rect").count(), 0, "{html}");
+    assert!(!html.contains("aria-live"), "{html}");
+}
+
+#[test]
+fn multi_hour_multichannel_waveform_keeps_processed_buckets_and_dom_geometry_bounded() {
+    fn app() -> Element {
+        let duration = Duration::from_secs(4 * 60 * 60);
+        let channels = 4;
+        let fine = (0..14_400 * channels)
+            .map(|index| (index % 100) as f32 / 100.0)
+            .collect();
+        let coarse = (0..240 * channels)
+            .map(|index| (index % 10) as f32 / 10.0)
+            .collect();
+        let data = WaveformData::from_magnitudes(
+            duration,
+            channels,
+            vec![
+                WaveformLevel::new(Duration::from_secs(1), fine),
+                WaveformLevel::new(Duration::from_secs(60), coarse),
+            ],
+        )
+        .unwrap();
+        let controller = use_waveform_viewport(
+            duration,
+            Some(Duration::from_secs(60 * 60)..Duration::from_secs(2 * 60 * 60)),
+        );
+
+        rsx! {
+            NavigableWaveform {
+                data,
+                controller,
+                fallback_bucket_budget: 256,
+                show_overview: false,
+            }
+        }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+
+    assert!(html.contains("data-bucket-count=60"), "{html}");
+    assert_eq!(html.matches("<path").count(), 4, "{html}");
+    assert_eq!(html.matches("<rect").count(), 0, "{html}");
+    assert_eq!(html.matches("type=\"range\"").count(), 0, "{html}");
+}
+
+#[test]
+fn navigable_waveform_range_text_distinguishes_nanosecond_boundaries() {
+    fn app() -> Element {
+        let data = WaveformData::from_magnitudes(
+            Duration::from_secs(1),
+            1,
+            vec![WaveformLevel::new(Duration::from_secs(1), vec![0.5])],
+        )
+        .unwrap();
+        let controller = use_waveform_viewport(
+            data.duration(),
+            Some(Duration::from_nanos(1)..Duration::from_nanos(2)),
+        );
+
+        rsx! { NavigableWaveform { data, controller } }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+
+    assert!(
+        html.contains("Visible 0:00.000000001 to 0:00.000000002"),
+        "{html}"
+    );
+    assert!(
+        html.contains("aria-valuetext=\"Visible 0:00.000000001 to 0:00.000000002\""),
+        "{html}"
+    );
 }

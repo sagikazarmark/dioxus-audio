@@ -1,12 +1,19 @@
 use std::fmt::Write as _;
+use std::ops::Range;
+use std::time::Duration;
 
 use dioxus::prelude::*;
 
 use crate::analysis::{WaveformSelection, downsample_peaks};
 use crate::playback::{AudioPlayerController, PlaybackSourceLifecycle};
-use crate::waveform::{AmplitudeMode, AmplitudeSlice, SignedEnvelope, WaveformData};
+use crate::waveform::{
+    AmplitudeMode, AmplitudeSlice, SignedEnvelope, WaveformData, WaveformViewportController,
+};
 
 use super::format_accessible_duration;
+
+const MAXIMUM_NAVIGABLE_BUCKET_BUDGET: usize = 4096;
+const MAXIMUM_PIXEL_DENSITY: f64 = 2.0;
 
 /// Render immutable Waveform Data as one responsive SVG path per channel.
 #[component]
@@ -16,40 +23,44 @@ pub fn Waveform(
     #[props(default = 96.0)] height: f64,
     #[props(default)] label: Option<String>,
 ) -> Element {
-    let height = if height.is_finite() {
-        height.max(1.0)
-    } else {
-        96.0
-    };
-    let view = data
-        .select(
-            std::time::Duration::ZERO..data.duration(),
-            bucket_budget.max(1),
-        )
-        .expect("Waveform Data and presentation budget are valid");
-    let channel_height = height / data.channel_count() as f64;
-    let paths = (0..data.channel_count())
-        .filter_map(|channel| {
-            let top = channel as f64 * channel_height;
-            match view.channel(channel)? {
-                AmplitudeSlice::Magnitudes(values) => {
-                    Some(magnitude_path(values, top, channel_height))
-                }
-                AmplitudeSlice::SignedEnvelopes(values) => {
-                    Some(signed_envelope_path(values, top, channel_height))
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-    let width = view.bucket_count().max(1);
+    let height = waveform_height(height);
+    let visible = Duration::ZERO..data.duration();
+
+    rsx! {
+        WaveformSvg {
+            data,
+            visible,
+            bucket_budget: bucket_budget.max(1),
+            height,
+            label,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct WaveformGeometry {
+    paths: Vec<String>,
+    view_start: f64,
+    view_span: f64,
+    amplitude_mode: &'static str,
+    channel_count: usize,
+    resolution: usize,
+    bucket_count: usize,
+}
+
+#[component]
+fn WaveformSvg(
+    data: WaveformData,
+    visible: Range<Duration>,
+    bucket_budget: usize,
+    height: f64,
+    label: Option<String>,
+) -> Element {
+    let geometry = use_memo(use_reactive!(|(data, visible, bucket_budget, height)| {
+        build_waveform_geometry(&data, visible, bucket_budget, height)
+    }));
+    let geometry = geometry();
     let role = label.as_ref().map(|_| "img");
-    let amplitude_mode = match data.mode() {
-        AmplitudeMode::Magnitude => "magnitude",
-        AmplitudeMode::SignedEnvelope => "signed-envelope",
-    };
-    let channel_count = data.channel_count();
-    let resolution = view.resolution_index();
-    let bucket_count = view.bucket_count();
 
     rsx! {
         svg {
@@ -57,15 +68,16 @@ pub fn Waveform(
             role,
             "aria-label": label,
             "aria-hidden": role.is_none(),
-            "data-amplitude-mode": amplitude_mode,
-            "data-channel-count": channel_count,
-            "data-resolution": resolution,
-            "data-bucket-count": bucket_count,
+            "data-amplitude-mode": geometry.amplitude_mode,
+            "data-channel-count": geometry.channel_count,
+            "data-resolution": geometry.resolution,
+            "data-bucket-count": geometry.bucket_count,
+            "data-bucket-budget": bucket_budget,
             width: "100%",
             height: "{height}",
-            view_box: "0 0 {width} {height}",
+            view_box: "{geometry.view_start} 0 {geometry.view_span} {height}",
             preserve_aspect_ratio: "none",
-            for path_data in paths {
+            for path_data in geometry.paths.iter() {
                 path {
                     class: "dioxus-audio__waveform-channel",
                     d: path_data,
@@ -75,28 +87,98 @@ pub fn Waveform(
     }
 }
 
-fn magnitude_path(values: &[f32], top: f64, height: f64) -> String {
+fn build_waveform_geometry(
+    data: &WaveformData,
+    visible: Range<Duration>,
+    bucket_budget: usize,
+    height: f64,
+) -> WaveformGeometry {
+    let view = data
+        .select(visible.clone(), bucket_budget.max(1))
+        .expect("Waveform Data and presentation budget are valid");
+    let channel_height = height / data.channel_count() as f64;
+    let bucket_span =
+        view.bucket_span().numerator().as_secs_f64() / view.bucket_span().divisor() as f64;
+    let axis = BucketAxis {
+        first_bucket: view.first_bucket(),
+        bucket_span,
+        source_end: data.duration().as_secs_f64(),
+    };
+    let paths = (0..data.channel_count())
+        .filter_map(|channel| {
+            let top = channel as f64 * channel_height;
+            match view.channel(channel)? {
+                AmplitudeSlice::Magnitudes(values) => {
+                    Some(magnitude_path(values, top, channel_height, axis))
+                }
+                AmplitudeSlice::SignedEnvelopes(values) => {
+                    Some(signed_envelope_path(values, top, channel_height, axis))
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let amplitude_mode = match data.mode() {
+        AmplitudeMode::Magnitude => "magnitude",
+        AmplitudeMode::SignedEnvelope => "signed-envelope",
+    };
+    WaveformGeometry {
+        paths,
+        view_start: visible.start.as_secs_f64(),
+        view_span: (visible.end - visible.start).as_secs_f64(),
+        amplitude_mode,
+        channel_count: data.channel_count(),
+        resolution: view.resolution_index(),
+        bucket_count: view.bucket_count(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BucketAxis {
+    first_bucket: usize,
+    bucket_span: f64,
+    source_end: f64,
+}
+
+impl BucketAxis {
+    fn start(self, local_bucket: usize) -> f64 {
+        (self.first_bucket + local_bucket) as f64 * self.bucket_span
+    }
+
+    fn end(self, local_bucket: usize) -> f64 {
+        (self.start(local_bucket) + self.bucket_span).min(self.source_end)
+    }
+}
+
+fn magnitude_path(values: &[f32], top: f64, height: f64, axis: BucketAxis) -> String {
     let baseline = top + height;
-    let mut path = format!("M0 {baseline}");
+    let first_x = axis.start(0);
+    let mut path = format!("M{first_x} {baseline}");
     for (index, value) in values.iter().enumerate() {
-        let x = index as f64;
-        let next_x = x + 1.0;
+        let x = axis.start(index);
+        let next_x = axis.end(index);
         let y = baseline - f64::from(*value) * height;
         let _ = write!(path, "L{x} {y}H{next_x}");
     }
-    let _ = write!(path, "L{} {baseline}Z", values.len());
+    let final_x = axis.end(values.len() - 1);
+    let _ = write!(path, "L{final_x} {baseline}Z");
     path
 }
 
-fn signed_envelope_path(values: &[SignedEnvelope], top: f64, height: f64) -> String {
+fn signed_envelope_path(
+    values: &[SignedEnvelope],
+    top: f64,
+    height: f64,
+    axis: BucketAxis,
+) -> String {
     let center = top + height / 2.0;
     let amplitude_height = height / 2.0;
     let upper = |value: SignedEnvelope| center - f64::from(value.max) * amplitude_height;
     let lower = |value: SignedEnvelope| center - f64::from(value.min) * amplitude_height;
+    let first_x = axis.start(0);
 
-    let mut path = format!("M0 {}", upper(values[0]));
+    let mut path = format!("M{first_x} {}", upper(values[0]));
     for (index, value) in values.iter().copied().enumerate() {
-        let next_x = index + 1;
+        let next_x = axis.end(index);
         if index > 0 {
             let _ = write!(path, "V{}", upper(value));
         }
@@ -104,15 +186,247 @@ fn signed_envelope_path(values: &[SignedEnvelope], top: f64, height: f64) -> Str
     }
 
     let last = values[values.len() - 1];
-    let _ = write!(path, "L{} {}", values.len(), lower(last));
+    let final_x = axis.end(values.len() - 1);
+    let _ = write!(path, "L{final_x} {}", lower(last));
     for index in (0..values.len()).rev() {
         if index + 1 < values.len() {
             let _ = write!(path, "V{}", lower(values[index]));
         }
-        let _ = write!(path, "H{index}");
+        let x = axis.start(index);
+        let _ = write!(path, "H{x}");
     }
     path.push('Z');
     path
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WaveformMeasurement {
+    bucket_budget: usize,
+    measured: bool,
+}
+
+/// Present and navigate one measured, source-time Waveform Viewport.
+///
+/// The server and first client render use `fallback_bucket_budget`. Once
+/// mounted, the component derives a per-channel budget from its observed CSS
+/// width and browser pixel density, capped at 2x density and 4,096 buckets.
+#[component]
+pub fn NavigableWaveform(
+    data: WaveformData,
+    controller: WaveformViewportController,
+    #[props(default = 512)] fallback_bucket_budget: usize,
+    #[props(default = 96.0)] height: f64,
+    #[props(default = true)] show_overview: bool,
+    #[props(default = "Waveform viewport".to_string())] label: String,
+) -> Element {
+    assert_eq!(
+        data.duration(),
+        controller.total_duration(),
+        "Waveform Data and Viewport Controller durations must match"
+    );
+    let height = waveform_height(height);
+    let fallback_bucket_budget = fallback_bucket_budget.clamp(1, MAXIMUM_NAVIGABLE_BUCKET_BUDGET);
+    let mut measurement = use_signal(move || WaveformMeasurement {
+        bucket_budget: fallback_bucket_budget,
+        measured: false,
+    });
+    let current_measurement = measurement();
+    let visible = controller.visible_range();
+    let span = visible.end - visible.start;
+    let center = visible.start + span / 2;
+    let total_duration = controller.total_duration();
+    let visible_text = format_visible_range(&visible);
+    let at_start = visible.start.is_zero();
+    let at_end = visible.end == total_duration;
+    let fully_zoomed_out = span == total_duration;
+    let fully_zoomed_in = span <= Duration::from_nanos(1);
+    let overview_minimum = span.as_secs_f64() / 2.0;
+    let overview_maximum = total_duration.as_secs_f64() - overview_minimum;
+    let overview_step = (span.as_secs_f64() / 100.0).max(0.001);
+    let budget_source = if current_measurement.measured {
+        "measured"
+    } else {
+        "fallback"
+    };
+    let render_data = data.clone();
+
+    rsx! {
+        div {
+            class: "dioxus-audio dioxus-audio__waveform-viewport",
+            role: "group",
+            aria_label: label,
+            "data-budget-source": budget_source,
+            onresize: move |event| {
+                let Ok(size) = event.data().get_content_box_size() else {
+                    return;
+                };
+                let Some(bucket_budget) = measured_bucket_budget(size.width) else {
+                    return;
+                };
+                let next = WaveformMeasurement {
+                    bucket_budget,
+                    measured: true,
+                };
+                if *measurement.peek() != next {
+                    measurement.set(next);
+                }
+            },
+            WaveformSvg {
+                data: render_data,
+                visible: visible.clone(),
+                bucket_budget: current_measurement.bucket_budget,
+                height,
+                label: None,
+            }
+            output {
+                class: "dioxus-audio__viewport-range",
+                "{visible_text}"
+            }
+            nav {
+                class: "dioxus-audio__viewport-controls",
+                aria_label: "Waveform viewport controls",
+                button {
+                    class: "dioxus-audio__viewport-control",
+                    r#type: "button",
+                    aria_label: "Pan backward",
+                    disabled: at_start,
+                    onclick: move |_| controller.pan(-0.5),
+                    "Pan back"
+                }
+                button {
+                    class: "dioxus-audio__viewport-control",
+                    r#type: "button",
+                    aria_label: "Zoom out",
+                    disabled: fully_zoomed_out,
+                    onclick: move |_| controller.zoom(0.5, center),
+                    "Zoom out"
+                }
+                button {
+                    class: "dioxus-audio__viewport-control",
+                    r#type: "button",
+                    aria_label: "Reset view",
+                    disabled: fully_zoomed_out,
+                    onclick: move |_| controller.reset(),
+                    "Reset"
+                }
+                button {
+                    class: "dioxus-audio__viewport-control",
+                    r#type: "button",
+                    aria_label: "Zoom in",
+                    disabled: fully_zoomed_in,
+                    onclick: move |_| controller.zoom(2.0, center),
+                    "Zoom in"
+                }
+                button {
+                    class: "dioxus-audio__viewport-control",
+                    r#type: "button",
+                    aria_label: "Pan forward",
+                    disabled: at_end,
+                    onclick: move |_| controller.pan(0.5),
+                    "Pan forward"
+                }
+            }
+            if show_overview {
+                label { class: "dioxus-audio__viewport-overview",
+                    span { "Overview" }
+                    input {
+                        r#type: "range",
+                        min: overview_minimum,
+                        max: overview_maximum.max(overview_minimum),
+                        step: overview_step,
+                        value: center.as_secs_f64(),
+                        disabled: fully_zoomed_out,
+                        aria_label: "Overview position",
+                        aria_valuetext: visible_text,
+                        oninput: move |event| {
+                            let Ok(requested_center) = event.value().parse::<f64>() else {
+                                return;
+                            };
+                            if !requested_center.is_finite() {
+                                return;
+                            }
+                            let span_seconds = span.as_secs_f64();
+                            let maximum_start = total_duration.as_secs_f64() - span_seconds;
+                            let start = (requested_center - span_seconds / 2.0)
+                                .clamp(0.0, maximum_start);
+                            controller.show_range(
+                                Duration::from_secs_f64(start)
+                                    ..Duration::from_secs_f64(start + span_seconds),
+                            );
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn waveform_height(height: f64) -> f64 {
+    if height.is_finite() {
+        height.max(1.0)
+    } else {
+        96.0
+    }
+}
+
+fn measured_bucket_budget(width: f64) -> Option<usize> {
+    if !width.is_finite() || width <= 0.0 {
+        return None;
+    }
+    let density = browser_pixel_density().clamp(1.0, MAXIMUM_PIXEL_DENSITY);
+    Some(((width * density).round() as usize).clamp(1, MAXIMUM_NAVIGABLE_BUCKET_BUDGET))
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+fn browser_pixel_density() -> f64 {
+    web_sys::window()
+        .map(|window| window.device_pixel_ratio())
+        .filter(|density| density.is_finite() && *density > 0.0)
+        .unwrap_or(1.0)
+}
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn browser_pixel_density() -> f64 {
+    1.0
+}
+
+fn format_visible_range(visible: &Range<Duration>) -> String {
+    let span = visible.end - visible.start;
+    let fractional_digits = if span >= Duration::from_millis(10) {
+        2
+    } else if span >= Duration::from_millis(1) {
+        3
+    } else if span >= Duration::from_micros(1) {
+        6
+    } else {
+        9
+    };
+    format!(
+        "Visible {} to {}",
+        format_source_time(visible.start, fractional_digits),
+        format_source_time(visible.end, fractional_digits)
+    )
+}
+
+fn format_source_time(duration: Duration, fractional_digits: usize) -> String {
+    let total_seconds = duration.as_secs();
+    let hours = total_seconds / 3_600;
+    let minutes = total_seconds / 60 % 60;
+    let seconds = total_seconds % 60;
+    let divisor = 10_u32.pow(9 - fractional_digits as u32);
+    let fraction_value = duration.subsec_nanos() / divisor;
+    let fraction = if fraction_value == 0 {
+        String::new()
+    } else {
+        let fraction = format!("{fraction_value:0fractional_digits$}");
+        format!(".{}", fraction.trim_end_matches('0'))
+    };
+
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}{fraction}")
+    } else {
+        format!("{minutes}:{seconds:02}{fraction}")
+    }
 }
 
 /// Present Playback position and one controlled Waveform Selection over Waveform Data.

@@ -1,8 +1,174 @@
 use std::time::Duration;
 
+use dioxus::prelude::*;
 use dioxus_audio::waveform::{
     AmplitudeMode, AmplitudeSlice, SignedEnvelope, WaveformData, WaveformError, WaveformLevel,
+    use_waveform_viewport,
 };
+
+#[test]
+fn viewport_commands_clamp_to_the_source_and_keep_a_positive_interval() {
+    fn app() -> Element {
+        let controller = use_waveform_viewport(
+            Duration::from_secs(100),
+            Some(Duration::from_secs(20)..Duration::from_secs(40)),
+        );
+
+        let observations = use_hook(move || {
+            let mut observations = format!(
+                "{}|{}-{}",
+                controller.total_duration().as_secs(),
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            );
+
+            controller.pan(-10.0);
+            observations.push_str(&format!(
+                "|{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            ));
+
+            controller.pan(10.0);
+            observations.push_str(&format!(
+                "|{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            ));
+
+            controller.show_range(Duration::from_secs(95)..Duration::from_secs(120));
+            observations.push_str(&format!(
+                "|{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            ));
+
+            controller.show_range(Duration::from_secs(80)..Duration::from_secs(20));
+            let repaired = controller.visible_range();
+            observations.push_str(&format!(
+                "|{}",
+                repaired.start < repaired.end && repaired.end <= controller.total_duration()
+            ));
+
+            controller.reset();
+            observations.push_str(&format!(
+                "|{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            ));
+            observations
+        });
+
+        rsx! { output { "{observations}" } }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+    assert!(
+        html.contains("100|20-40|0-20|80-100|75-100|true|0-100"),
+        "{html}"
+    );
+}
+
+#[test]
+fn viewport_zoom_preserves_an_explicit_anchor_until_a_source_boundary_intervenes() {
+    fn app() -> Element {
+        let controller = use_waveform_viewport(
+            Duration::from_secs(100),
+            Some(Duration::from_secs(20)..Duration::from_secs(60)),
+        );
+
+        let observations = use_hook(move || {
+            controller.zoom(2.0, Duration::from_secs(30));
+            let mut observations = format!(
+                "{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            );
+
+            controller.show_range(Duration::from_secs(20)..Duration::from_secs(60));
+            controller.zoom(2.0, Duration::from_secs(20));
+            observations.push_str(&format!(
+                "|{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            ));
+
+            controller.show_range(Duration::from_secs(20)..Duration::from_secs(60));
+            controller.zoom(2.0, Duration::from_secs(60));
+            observations.push_str(&format!(
+                "|{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            ));
+
+            controller.zoom(f64::MAX, Duration::from_secs(50));
+            let extreme_in = controller.visible_range();
+            observations.push_str(&format!(
+                "|{}",
+                (extreme_in.end - extreme_in.start).as_nanos()
+            ));
+
+            controller.zoom(f64::MIN_POSITIVE, Duration::from_secs(50));
+            observations.push_str(&format!(
+                "|{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            ));
+
+            controller.zoom(f64::NAN, Duration::from_secs(50));
+            observations.push_str(&format!(
+                "|{}-{}",
+                controller.visible_range().start.as_secs(),
+                controller.visible_range().end.as_secs()
+            ));
+            observations
+        });
+
+        rsx! { output { "{observations}" } }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+    assert!(html.contains("25-45|20-40|40-60|1|0-100|0-100"), "{html}");
+}
+
+#[test]
+fn viewport_navigation_keeps_nanosecond_precision_far_into_a_long_source() {
+    fn app() -> Element {
+        let total = Duration::from_secs(365 * 24 * 60 * 60);
+        let start = Duration::from_secs(300 * 24 * 60 * 60) + Duration::from_nanos(20);
+        let controller = use_waveform_viewport(total, Some(start..start + Duration::from_nanos(2)));
+
+        let observations = use_hook(move || {
+            controller.zoom(2.0, start + Duration::from_nanos(1));
+            let zoomed = controller.visible_range();
+            let mut observations = format!(
+                "{}-{}",
+                (zoomed.start - start).as_nanos(),
+                (zoomed.end - start).as_nanos()
+            );
+
+            controller.pan(1.0);
+            let panned = controller.visible_range();
+            observations.push_str(&format!(
+                "|{}-{}",
+                (panned.start - start).as_nanos(),
+                (panned.end - start).as_nanos()
+            ));
+            observations
+        });
+
+        rsx! { output { "{observations}" } }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+    assert!(html.contains("0-1|1-2"), "{html}");
+}
 
 #[test]
 fn magnitude_data_preserves_multichannel_buckets_and_snapshot_identity() {

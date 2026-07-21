@@ -11,6 +11,10 @@ type BoundedPlaybackTestWindow = typeof globalThis & {
   setBoundedHidden?: (hidden: boolean) => void;
 };
 
+type WaveformTestWindow = typeof globalThis & {
+  flushWaveformResize?: () => void;
+};
+
 async function capturePlaybackElements(page: import("@playwright/test").Page) {
   await page.addInitScript(() => {
     const NativeAudio = window.Audio;
@@ -145,6 +149,138 @@ test("Waveform Data preserves mode and channels in a narrow viewport", async ({
     return parent !== null && element.getBoundingClientRect().width <= parent.clientWidth;
   });
   expect(fitsContainer).toBe(true);
+});
+
+test("long Waveforms have a complete native keyboard navigation path", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/waveforms", "Preview and select waveform ranges");
+
+  const viewport = page.getByRole("group", {
+    name: "Four-hour stereo waveform",
+  });
+  const range = viewport.locator(".dioxus-audio__viewport-range");
+  const zoomIn = viewport.getByRole("button", { name: "Zoom in" });
+  const overview = viewport.getByRole("slider", {
+    name: "Overview position",
+  });
+
+  await expect(range).toHaveText("Visible 1:00:00 to 1:30:00");
+  await expect(viewport.getByRole("button")).toHaveCount(5);
+  await expect(overview).toBeEnabled();
+  await expect(overview).toHaveAttribute(
+    "aria-valuetext",
+    "Visible 1:00:00 to 1:30:00",
+  );
+
+  await zoomIn.focus();
+  await zoomIn.press("Enter");
+  await expect(zoomIn).toBeFocused();
+  await expect(range).toHaveText("Visible 1:07:30 to 1:22:30");
+
+  const panBackward = viewport.getByRole("button", { name: "Pan backward" });
+  await panBackward.focus();
+  await panBackward.press("Enter");
+  await expect(panBackward).toBeFocused();
+  await expect(range).toHaveText("Visible 1:00:00 to 1:15:00");
+  await viewport.getByRole("button", { name: "Pan forward" }).press("Enter");
+  await expect(range).toHaveText("Visible 1:07:30 to 1:22:30");
+
+  await viewport.getByRole("button", { name: "Zoom out" }).press("Enter");
+  await expect(range).toHaveText("Visible 1:00:00 to 1:30:00");
+  await zoomIn.press("Enter");
+  await expect(range).toHaveText("Visible 1:07:30 to 1:22:30");
+
+  await overview.focus();
+  await overview.press("End");
+  await expect(overview).toBeFocused();
+  await expect(range).toHaveText("Visible 3:45:00 to 4:00:00");
+  await expect(
+    viewport.getByRole("button", { name: "Pan forward" }),
+  ).toBeDisabled();
+
+  await viewport.getByRole("button", { name: "Reset view" }).click();
+  await expect(range).toHaveText("Visible 0:00 to 4:00:00");
+  await expect(overview).toBeDisabled();
+  await expect(viewport.getByRole("button", { name: "Zoom out" })).toBeDisabled();
+});
+
+test("long Waveform resolution follows measured width within bounded geometry", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const NativeResizeObserver = window.ResizeObserver;
+    const pending: Array<() => void> = [];
+    let defer = true;
+    class DeferredResizeObserver extends NativeResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        let observer: ResizeObserver;
+        super((entries) => {
+          if (defer) pending.push(() => callback(entries, observer));
+          else callback(entries, observer);
+        });
+        observer = this;
+      }
+    }
+    Object.defineProperty(window, "ResizeObserver", {
+      configurable: true,
+      value: DeferredResizeObserver,
+    });
+    (window as WaveformTestWindow).flushWaveformResize = () => {
+      defer = false;
+      for (const callback of pending.splice(0)) callback();
+    };
+  });
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await openRoute("/waveforms", "Preview and select waveform ranges");
+
+  const viewport = page.getByRole("group", {
+    name: "Four-hour stereo waveform",
+  });
+  const waveform = viewport.locator("svg.dioxus-audio__waveform-data");
+  await expect(viewport).toHaveAttribute("data-budget-source", "fallback");
+  await expect(waveform).toHaveAttribute("data-bucket-budget", "64");
+  await expect(waveform).toHaveAttribute("data-resolution", "3");
+
+  await page.evaluate(() => {
+    (window as WaveformTestWindow).flushWaveformResize?.();
+  });
+  await expect(viewport).toHaveAttribute("data-budget-source", "measured");
+  const desktopBudget = Number(await waveform.getAttribute("data-bucket-budget"));
+  const desktopResolution = Number(await waveform.getAttribute("data-resolution"));
+  const desktopBuckets = Number(await waveform.getAttribute("data-bucket-count"));
+  expect(desktopBudget).toBeGreaterThan(64);
+  expect(desktopBudget).toBeLessThanOrEqual(4096);
+  expect(desktopBuckets).toBeLessThanOrEqual(desktopBudget);
+  await expect(waveform.locator("path")).toHaveCount(2);
+  await expect(waveform.locator("rect")).toHaveCount(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect
+    .poll(async () => Number(await waveform.getAttribute("data-bucket-budget")))
+    .toBeLessThan(desktopBudget);
+  const mobileBudget = Number(await waveform.getAttribute("data-bucket-budget"));
+  const mobileResolution = Number(await waveform.getAttribute("data-resolution"));
+  const mobileBuckets = Number(await waveform.getAttribute("data-bucket-count"));
+  expect(mobileResolution).toBeGreaterThan(desktopResolution);
+  expect(mobileBuckets).toBeLessThanOrEqual(mobileBudget);
+
+  const containment = await viewport.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const parent = element.parentElement?.getBoundingClientRect();
+    const svg = element.querySelector("svg")?.getBoundingClientRect();
+    return (
+      parent !== undefined &&
+      svg !== undefined &&
+      bounds.left >= parent.left &&
+      bounds.right <= parent.right &&
+      svg.left >= bounds.left &&
+      svg.right <= bounds.right
+    );
+  });
+  expect(containment).toBe(true);
 });
 
 test("interactive Waveforms keep keyboard timelines constrained and independent", async ({

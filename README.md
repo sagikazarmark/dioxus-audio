@@ -604,6 +604,40 @@ resolution when none fit, as borrowed channel slices without copying buckets.
 Clone and equality use shared snapshot identity, so independently reconstructed
 data intentionally counts as changed.
 
+For long sources, create a `WaveformViewportController` with
+`use_waveform_viewport` and pass it to `NavigableWaveform`. The Controller
+exposes the total duration and positive visible source-time range, plus clamped
+`pan`, `show_range`, `reset`, and explicit-anchor `zoom` commands. The composed
+component provides native pan, zoom, reset, and optional fixed-span overview
+controls with visible source-time text.
+
+```rust
+use dioxus_audio::components::NavigableWaveform;
+use dioxus_audio::waveform::use_waveform_viewport;
+
+let viewport = use_waveform_viewport(
+    data.duration(),
+    Some(Duration::from_secs(60)..Duration::from_secs(120)),
+);
+
+rsx! {
+    NavigableWaveform {
+        data,
+        controller: viewport,
+        fallback_bucket_budget: 512,
+        label: "Episode waveform",
+    }
+}
+```
+
+`NavigableWaveform` uses the fallback budget for server rendering and the first
+client render. Dioxus resize observation then derives a budget from measured CSS
+width with pixel density capped at 2x and a maximum of 4,096 buckets per
+channel. It selects only the intersecting borrowed range and renders one compact,
+amplitude-mode-aware SVG path per channel. A sparse resolution ladder can still
+make the coarsest stored level exceed the requested budget; applications should
+include a suitably coarse long-form level when bounded geometry matters.
+
 `InteractiveWaveform` composes Waveform Data, an `AudioPlayerController`, and
 one controlled `WaveformSelection`. Playback position, selection start, and
 selection end remain independently named native sliders. Arrow keys use the

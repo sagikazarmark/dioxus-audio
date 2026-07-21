@@ -812,6 +812,9 @@ test("source end drains final chunks before completion", async ({
   await expect(
     demo.getByRole("status").filter({ hasText: "Recording ready" }),
   ).toBeVisible();
+  await expect(
+    demo.getByText("Recording completion cause: SourceEnded", { exact: true }),
+  ).toBeVisible();
   const events = await lifecycle.locator("li").allTextContents();
   expect(events.length - 1).toBeGreaterThan(chunksBeforeSourceEnd);
   expect(events.at(-1)).toMatch(
@@ -822,6 +825,90 @@ test("source end drains final chunks before completion", async ({
   expect(Number(finalChunkBytes)).toBe(finalBlobSize.size);
   await page.waitForTimeout(300);
   await expect(lifecycle.locator("li")).toHaveCount(events.length);
+});
+
+test("source-ended completion survives an already inactive browser recorder", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      activeSuppliedRecorder?: MediaRecorder;
+      suppliedEndedListener?: EventListenerOrEventListenerObject | null;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const stream = await getUserMedia(constraints);
+        browser.suppliedTrack = stream.getAudioTracks()[0];
+        return stream;
+      },
+    });
+    const addEventListener = MediaStreamTrack.prototype.addEventListener;
+    MediaStreamTrack.prototype.addEventListener = function (
+      type,
+      listener,
+      options,
+    ) {
+      if (type === "ended") {
+        browser.suppliedEndedListener = listener;
+      }
+      return addEventListener.call(this, type, listener, options);
+    };
+    const start = MediaRecorder.prototype.start;
+    MediaRecorder.prototype.start = function (timeslice?: number) {
+      browser.activeSuppliedRecorder = this;
+      if (timeslice === undefined) {
+        return start.call(this);
+      }
+      return start.call(this, timeslice);
+    };
+  });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+
+  await demo
+    .getByRole("button", { name: "Prepare supplied Recording Source" })
+    .click();
+  await demo
+    .getByRole("button", { name: "Start supplied recording" })
+    .click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      activeSuppliedRecorder?: MediaRecorder;
+      suppliedEndedListener?: EventListenerOrEventListenerObject | null;
+    };
+    browser.activeSuppliedRecorder?.stop();
+    const listener = browser.suppliedEndedListener;
+    const event = new Event("ended");
+    if (typeof listener === "function") {
+      listener.call(browser.suppliedTrack, event);
+    } else {
+      listener?.handleEvent(event);
+    }
+  });
+
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toBeVisible();
+  await expect(
+    demo.getByText("Recording completion cause: SourceEnded", { exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        suppliedTrack?: MediaStreamTrack;
+      };
+      return browser.suppliedTrack?.readyState;
+    }),
+  ).toBe("live");
+  expect(pageErrors).toEqual([]);
 });
 
 test("unmount suppresses an in-flight chunk conversion", async ({
@@ -1119,6 +1206,221 @@ test("a supplied Recording Source is analysed, recorded, played, and preserved",
   ).toEqual({ readyState: "live", sharedReadyState: "live", stopCalls: 0 });
 });
 
+test("supplied source interruption is observable without pausing Recording or changing application policy", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      suppliedMuteListener?: EventListenerOrEventListenerObject | null;
+      suppliedUnmuteListener?: EventListenerOrEventListenerObject | null;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const stream = await getUserMedia(constraints);
+        browser.suppliedTrack = stream.getAudioTracks()[0];
+        return stream;
+      },
+    });
+    const addEventListener = MediaStreamTrack.prototype.addEventListener;
+    MediaStreamTrack.prototype.addEventListener = function (
+      type,
+      listener,
+      options,
+    ) {
+      if (this.kind === "audio" && type === "mute") {
+        browser.suppliedMuteListener = listener;
+      }
+      if (this.kind === "audio" && type === "unmute") {
+        browser.suppliedUnmuteListener = listener;
+      }
+      return addEventListener.call(this, type, listener, options);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+
+  await demo
+    .getByRole("button", { name: "Prepare supplied Recording Source" })
+    .click();
+  await demo
+    .getByRole("button", { name: "Start supplied recording" })
+    .click();
+  await expect(
+    demo.getByText("Recording Source availability: Live", { exact: true }),
+  ).toBeVisible();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+    };
+    if (browser.suppliedTrack) {
+      browser.suppliedTrack.enabled = false;
+    }
+  });
+  await page.waitForTimeout(200);
+  await expect(
+    demo.getByText("Recording Source availability: Live", { exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        suppliedTrack?: MediaStreamTrack;
+      };
+      return browser.suppliedTrack?.enabled;
+    }),
+  ).toBe(false);
+
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      suppliedMuteListener?: EventListenerOrEventListenerObject | null;
+    };
+    const listener = browser.suppliedMuteListener;
+    const event = new Event("mute");
+    if (typeof listener === "function") {
+      listener.call(browser.suppliedTrack, event);
+    } else {
+      listener?.handleEvent(event);
+    }
+  });
+
+  await expect(
+    demo.getByText("Recording Source availability: Interrupted", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await page.waitForTimeout(1_100);
+  await expect(
+    demo.getByRole("timer", { name: "Recording elapsed time" }),
+  ).not.toHaveText("0:00");
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        suppliedTrack?: MediaStreamTrack;
+      };
+      return browser.suppliedTrack?.enabled;
+    }),
+  ).toBe(false);
+
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      suppliedUnmuteListener?: EventListenerOrEventListenerObject | null;
+    };
+    const listener = browser.suppliedUnmuteListener;
+    const event = new Event("unmute");
+    if (typeof listener === "function") {
+      listener.call(browser.suppliedTrack, event);
+    } else {
+      listener?.handleEvent(event);
+    }
+  });
+  await expect(
+    demo.getByText("Recording Source availability: Live", { exact: true }),
+  ).toBeVisible();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+});
+
+test("requested completion and discard win over a later supplied source end", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      suppliedEndedListener?: EventListenerOrEventListenerObject | null;
+      endSourceDuringStop?: boolean;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const stream = await getUserMedia(constraints);
+        browser.suppliedTrack = stream.getAudioTracks()[0];
+        return stream;
+      },
+    });
+    const addEventListener = MediaStreamTrack.prototype.addEventListener;
+    MediaStreamTrack.prototype.addEventListener = function (
+      type,
+      listener,
+      options,
+    ) {
+      if (type === "ended") {
+        browser.suppliedEndedListener = listener;
+      }
+      return addEventListener.call(this, type, listener, options);
+    };
+    const stop = MediaRecorder.prototype.stop;
+    MediaRecorder.prototype.stop = function () {
+      const result = stop.call(this);
+      if (browser.endSourceDuringStop) {
+        browser.endSourceDuringStop = false;
+        const listener = browser.suppliedEndedListener;
+        const event = new Event("ended");
+        if (typeof listener === "function") {
+          listener.call(browser.suppliedTrack, event);
+        } else {
+          listener?.handleEvent(event);
+        }
+      }
+      return result;
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const startSupplied = demo.getByRole("button", {
+    name: "Start supplied recording",
+  });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+
+  await demo
+    .getByRole("button", { name: "Prepare supplied Recording Source" })
+    .click();
+  await startSupplied.click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      endSourceDuringStop?: boolean;
+    };
+    browser.endSourceDuringStop = true;
+  });
+  await demo.getByRole("button", { name: "Stop recording" }).click();
+
+  await expect(
+    demo.getByText("Recording completion cause: Requested", { exact: true }),
+  ).toBeVisible();
+
+  await startSupplied.click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      endSourceDuringStop?: boolean;
+    };
+    browser.endSourceDuringStop = true;
+  });
+  await demo.getByRole("button", { name: "Cancel recording" }).click();
+
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Discarded"),
+      ).length,
+    )
+    .toBe(1);
+  await expect(
+    demo.getByText("Recording completion cause: Unavailable", { exact: true }),
+  ).toBeVisible();
+});
+
 test("supplied Recording Sources reject zero, multiple, and ended audio tracks without stopping them", async ({
   openRoute,
   page,
@@ -1172,6 +1474,16 @@ test("supplied Recording Sources reject zero, multiple, and ended audio tracks w
     name: "Prepare supplied Recording Source",
   });
   const start = demo.getByRole("button", { name: "Start supplied recording" });
+  await demo
+    .getByRole("checkbox", {
+      name: "Stop supplied audio track on Recorder cleanup",
+    })
+    .check();
+  await expect(
+    demo.getByText("Future supplied source shutdown: StopAudioTracks", {
+      exact: true,
+    }),
+  ).toBeVisible();
 
   const validationCases = [
     ["zero", "Recording Source must contain exactly one audio track"],
@@ -1303,6 +1615,11 @@ test("a supplied disabled and browser-muted audio track records without its vide
     .getByRole("button", { name: "Start supplied recording" })
     .click();
   await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await expect(
+    demo.getByText("Recording Source availability: Interrupted", {
+      exact: true,
+    }),
+  ).toBeVisible();
   await expect(
     demo.getByText("Requested sample rate: not started", { exact: true }),
   ).toBeVisible();
@@ -1524,6 +1841,332 @@ test("a supplied Recording Source is preserved across every Recorder cleanup pat
   await demo.getByRole("button", { name: "Unmount recorder" }).click();
   await expect(demo.getByText("Recorder unmounted", { exact: true })).toBeVisible();
   await expectSuppliedTrackToBePreserved(page);
+});
+
+test("explicit shutdown authority stops the accepted supplied audio track exactly once", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      suppliedTrackStopCalls?: number;
+      allTrackStopCalls?: number;
+      stoppedTrack?: MediaStreamTrack;
+      suppliedGetUserMediaCalls?: number;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const stream = await getUserMedia(constraints);
+        browser.suppliedGetUserMediaCalls =
+          (browser.suppliedGetUserMediaCalls ?? 0) + 1;
+        browser.suppliedTrack = stream.getAudioTracks()[0];
+        return stream;
+      },
+    });
+    const stop = MediaStreamTrack.prototype.stop;
+    MediaStreamTrack.prototype.stop = function () {
+      browser.allTrackStopCalls = (browser.allTrackStopCalls ?? 0) + 1;
+      browser.stoppedTrack = this;
+      if (this === browser.suppliedTrack) {
+        browser.suppliedTrackStopCalls =
+          (browser.suppliedTrackStopCalls ?? 0) + 1;
+      }
+      return stop.call(this);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+
+  await demo
+    .getByRole("checkbox", {
+      name: "Stop supplied audio track on Recorder cleanup",
+    })
+    .check();
+  await expect(
+    demo.getByText("Future supplied source shutdown: StopAudioTracks", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await demo
+    .getByRole("button", { name: "Prepare supplied Recording Source" })
+    .click();
+  await demo
+    .getByRole("button", { name: "Start supplied recording" })
+    .click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await demo.getByRole("button", { name: "Stop recording" }).click();
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toBeVisible();
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          suppliedTrack?: MediaStreamTrack;
+          suppliedTrackStopCalls?: number;
+          allTrackStopCalls?: number;
+          stoppedTrack?: MediaStreamTrack;
+          suppliedGetUserMediaCalls?: number;
+        };
+        return {
+          readyState: browser.suppliedTrack?.readyState,
+          stopCalls: browser.suppliedTrackStopCalls ?? 0,
+          allStopCalls: browser.allTrackStopCalls ?? 0,
+          stoppedReadyState: browser.stoppedTrack?.readyState,
+          getUserMediaCalls: browser.suppliedGetUserMediaCalls ?? 0,
+        };
+      }),
+    )
+    .toEqual({
+      readyState: "ended",
+      stopCalls: 1,
+      allStopCalls: 1,
+      stoppedReadyState: "ended",
+      getUserMediaCalls: 1,
+    });
+});
+
+test("explicit shutdown authority is exact once across every other terminal path", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    type ShutdownPath =
+      | "construction-failure"
+      | "start-failure"
+      | "discard"
+      | "runtime-failure"
+      | "finalization-failure"
+      | "source-ended-while-paused"
+      | "unmount"
+      | "pending-start-unmount";
+    const browser = globalThis as typeof globalThis & {
+      shutdownPath?: ShutdownPath;
+      suppliedTrack?: MediaStreamTrack;
+      suppliedTrackStopCalls?: number;
+      activeSuppliedRecorder?: MediaRecorder;
+      suppliedEndedListener?: EventListenerOrEventListenerObject | null;
+      failFinalization?: boolean;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const stream = await getUserMedia(constraints);
+        browser.suppliedTrack = stream.getAudioTracks()[0];
+        return stream;
+      },
+    });
+    const stopTrack = MediaStreamTrack.prototype.stop;
+    MediaStreamTrack.prototype.stop = function () {
+      if (this === browser.suppliedTrack) {
+        browser.suppliedTrackStopCalls =
+          (browser.suppliedTrackStopCalls ?? 0) + 1;
+      }
+      return stopTrack.call(this);
+    };
+    const addEventListener = MediaStreamTrack.prototype.addEventListener;
+    MediaStreamTrack.prototype.addEventListener = function (
+      type,
+      listener,
+      options,
+    ) {
+      if (type === "ended") {
+        browser.suppliedEndedListener = listener;
+      }
+      return addEventListener.call(this, type, listener, options);
+    };
+    const start = MediaRecorder.prototype.start;
+    MediaRecorder.prototype.start = function (timeslice?: number) {
+      browser.activeSuppliedRecorder = this;
+      if (browser.shutdownPath === "start-failure") {
+        throw new DOMException("forced supplied start rejection");
+      }
+      if (browser.shutdownPath === "pending-start-unmount") {
+        return;
+      }
+      if (timeslice === undefined) {
+        return start.call(this);
+      }
+      return start.call(this, timeslice);
+    };
+    const NativeMediaRecorder = MediaRecorder;
+    Object.defineProperty(globalThis, "MediaRecorder", {
+      configurable: true,
+      value: new Proxy(NativeMediaRecorder, {
+        construct(target, argumentsList) {
+          if (browser.shutdownPath === "construction-failure") {
+            throw new DOMException("forced supplied construction failure");
+          }
+          return Reflect.construct(target, argumentsList);
+        },
+      }),
+    });
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    Blob.prototype.arrayBuffer = function () {
+      if (browser.failFinalization) {
+        return Promise.reject(
+          new DOMException("forced supplied finalization failure"),
+        );
+      }
+      return arrayBuffer.call(this);
+    };
+  });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const paths = [
+    "construction-failure",
+    "start-failure",
+    "discard",
+    "runtime-failure",
+    "finalization-failure",
+    "source-ended-while-paused",
+    "unmount",
+    "pending-start-unmount",
+  ] as const;
+
+  for (const shutdownPath of paths) {
+    await openRoute("/recorder", "Capture, inspect, and replay");
+    const demo = page.getByRole("region", { name: "Example demo" });
+    const lifecycle = demo.getByRole("log", {
+      name: "Recording lifecycle events",
+    });
+    await page.evaluate((path) => {
+      const browser = globalThis as typeof globalThis & {
+        shutdownPath?: typeof path;
+      };
+      browser.shutdownPath = path;
+    }, shutdownPath);
+    await demo
+      .getByRole("checkbox", {
+        name: "Stop supplied audio track on Recorder cleanup",
+      })
+      .check();
+    await expect(
+      demo.getByText("Future supplied source shutdown: StopAudioTracks", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await demo
+      .getByRole("button", { name: "Prepare supplied Recording Source" })
+      .click();
+    await expect(
+      demo.getByText("Supplied Recording Source ready", { exact: true }),
+    ).toBeVisible();
+    await demo
+      .getByRole("button", { name: "Start supplied recording" })
+      .click();
+
+    if (
+      shutdownPath !== "construction-failure" &&
+      shutdownPath !== "start-failure" &&
+      shutdownPath !== "pending-start-unmount"
+    ) {
+      await expect(
+        demo.getByText("Recording", { exact: true }).first(),
+      ).toBeVisible();
+    }
+
+    if (shutdownPath === "discard") {
+      await demo.getByRole("button", { name: "Cancel recording" }).click();
+    }
+    if (shutdownPath === "runtime-failure") {
+      await page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          activeSuppliedRecorder?: MediaRecorder;
+        };
+        browser.activeSuppliedRecorder?.dispatchEvent(new Event("error"));
+        browser.activeSuppliedRecorder?.stop();
+      });
+    }
+    if (shutdownPath === "finalization-failure") {
+      await page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          failFinalization?: boolean;
+        };
+        browser.failFinalization = true;
+      });
+      await demo.getByRole("button", { name: "Stop recording" }).click();
+    }
+    if (shutdownPath === "source-ended-while-paused") {
+      await demo.getByRole("button", { name: "Pause", exact: true }).click();
+      await expect(
+        demo.getByText("Recording paused", { exact: true }),
+      ).toBeVisible();
+      await page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          suppliedTrack?: MediaStreamTrack;
+          suppliedEndedListener?: EventListenerOrEventListenerObject | null;
+        };
+        const listener = browser.suppliedEndedListener;
+        const event = new Event("ended");
+        if (typeof listener === "function") {
+          listener.call(browser.suppliedTrack, event);
+        } else {
+          listener?.handleEvent(event);
+        }
+      });
+      await expect(
+        demo.getByText("Recording completion cause: SourceEnded", {
+          exact: true,
+        }),
+      ).toBeVisible();
+    }
+    if (shutdownPath === "unmount") {
+      await demo.getByRole("button", { name: "Unmount recorder" }).click();
+      await expect(
+        demo.getByText("Recorder unmounted", { exact: true }),
+      ).toBeVisible();
+    }
+    if (shutdownPath === "pending-start-unmount") {
+      await expect(
+        demo.getByText("Preparing", { exact: true }).first(),
+      ).toBeVisible();
+      await demo.getByRole("button", { name: "Unmount recorder" }).click();
+      await expect(
+        demo.getByText("Recorder unmounted", { exact: true }),
+      ).toBeVisible();
+    }
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const browser = globalThis as typeof globalThis & {
+            suppliedTrack?: MediaStreamTrack;
+            suppliedTrackStopCalls?: number;
+          };
+          return {
+            readyState: browser.suppliedTrack?.readyState,
+            stopCalls: browser.suppliedTrackStopCalls ?? 0,
+          };
+        }),
+      )
+      .toEqual({ readyState: "ended", stopCalls: 1 });
+
+    if (
+      shutdownPath === "unmount" ||
+      shutdownPath === "pending-start-unmount"
+    ) {
+      const eventsAtUnmount = await lifecycle.locator("li").count();
+      await page.waitForTimeout(300);
+      await expect(lifecycle.locator("li")).toHaveCount(eventsAtUnmount);
+    }
+    await page.waitForTimeout(100);
+    expect(
+      await page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          suppliedTrackStopCalls?: number;
+        };
+        return browser.suppliedTrackStopCalls ?? 0;
+      }),
+    ).toBe(1);
+  }
+
+  expect(pageErrors).toEqual([]);
 });
 
 test("unmount cleans up a supplied Recording while browser startup is pending", async ({

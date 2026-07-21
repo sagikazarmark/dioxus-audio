@@ -1,7 +1,7 @@
 use dioxus_audio::recorder::{
     CompletionDisposition, RecorderConstraintCapabilities, RecorderLifecycle, RecorderOptions,
-    RecorderStatus, RecordingChunkDelivery, RecordingConstraint, RecordingConstraints,
-    RecordingOutcome, RecordingSourceSettings,
+    RecorderStatus, RecordingChunkDelivery, RecordingCompletionCause, RecordingConstraint,
+    RecordingConstraints, RecordingOutcome, RecordingSourceSettings,
 };
 use dioxus_audio::{AudioError, AudioErrorKind, RecordingChunk};
 
@@ -19,6 +19,10 @@ fn stopped_recording_completes_once_and_returns_to_idle() {
     assert_eq!(
         recorder.begin_finalize(recording_id),
         Some(CompletionDisposition::Save)
+    );
+    assert_eq!(
+        recorder.completion_cause(recording_id),
+        Some(RecordingCompletionCause::Requested)
     );
     assert!(recorder.start().is_err());
     assert_eq!(recorder.status(), &RecorderStatus::Stopping);
@@ -55,11 +59,68 @@ fn browser_initiated_stop_finalizes_the_partial_recording() {
         recorder.begin_finalize(recording_id),
         Some(CompletionDisposition::Save)
     );
+    assert_eq!(
+        recorder.completion_cause(recording_id),
+        Some(RecordingCompletionCause::UnexpectedEnd)
+    );
     assert_eq!(recorder.status(), &RecorderStatus::Stopping);
     assert!(recorder.stop().is_err());
     assert!(recorder.cancel().is_err());
     assert!(recorder.complete_finalize(recording_id));
     assert_eq!(recorder.status(), &RecorderStatus::Idle);
+}
+
+#[test]
+fn source_end_completes_an_active_or_paused_recording_with_its_cause() {
+    for paused in [false, true] {
+        let mut recorder = RecorderLifecycle::default();
+        let recording_id = recorder.start().unwrap();
+        recorder.started(recording_id);
+        if paused {
+            recorder.pause().unwrap();
+        }
+
+        assert!(recorder.source_ended());
+        assert_eq!(recorder.status(), &RecorderStatus::Stopping);
+        assert_eq!(
+            recorder.completion_cause(recording_id),
+            Some(RecordingCompletionCause::SourceEnded)
+        );
+        assert_eq!(
+            recorder.begin_finalize(recording_id),
+            Some(CompletionDisposition::Save)
+        );
+    }
+}
+
+#[test]
+fn an_earlier_completion_or_discard_wins_over_source_end() {
+    let mut completed = RecorderLifecycle::default();
+    let completed_id = completed.start().unwrap();
+    completed.started(completed_id);
+    completed.stop().unwrap();
+
+    assert!(!completed.source_ended());
+    assert_eq!(
+        completed.completion_cause(completed_id),
+        Some(RecordingCompletionCause::Requested)
+    );
+    assert_eq!(
+        completed.begin_finalize(completed_id),
+        Some(CompletionDisposition::Save)
+    );
+
+    let mut discarded = RecorderLifecycle::default();
+    let discarded_id = discarded.start().unwrap();
+    discarded.started(discarded_id);
+    discarded.cancel().unwrap();
+
+    assert!(!discarded.source_ended());
+    assert_eq!(discarded.completion_cause(discarded_id), None);
+    assert_eq!(
+        discarded.begin_finalize(discarded_id),
+        Some(CompletionDisposition::Discard)
+    );
 }
 
 #[test]
@@ -180,7 +241,14 @@ fn recording_outcomes_expose_the_recording_identity() {
     let recording_id = recorder.start().unwrap();
     let error = AudioError::new(AudioErrorKind::RecorderFailure, "encoder stopped");
 
-    let completed = RecordingOutcome::Completed(recording_id);
+    let completed = RecordingOutcome::Completed {
+        recording_id,
+        cause: RecordingCompletionCause::Requested,
+    };
+    let source_ended = RecordingOutcome::Completed {
+        recording_id,
+        cause: RecordingCompletionCause::SourceEnded,
+    };
     let discarded = RecordingOutcome::Discarded(recording_id);
     let failed = RecordingOutcome::Failed {
         recording_id,
@@ -188,6 +256,8 @@ fn recording_outcomes_expose_the_recording_identity() {
     };
 
     assert_eq!(completed.recording_id(), recording_id);
+    assert_eq!(source_ended.recording_id(), recording_id);
+    assert_ne!(completed, source_ended);
     assert_eq!(discarded.recording_id(), recording_id);
     assert_eq!(failed.recording_id(), recording_id);
     assert_eq!(

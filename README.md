@@ -110,21 +110,35 @@ Browser applications that already own a media stream can wrap it as an opaque
 `RecordingSource` and start without another device acquisition:
 
 ```rust
-use dioxus_audio::recorder::RecordingSource;
+use dioxus_audio::recorder::{RecordingSource, RecordingSourceShutdown};
 
-let source = RecordingSource::from_media_stream(application_stream.clone());
+let source = RecordingSource::from_media_stream(&application_stream);
 recorder
     .start_with_source(source)
     .expect("Recorder accepted the supplied source");
+
+let disposable_source = RecordingSource::from_media_stream(&temporary_stream)
+    .with_shutdown(RecordingSourceShutdown::StopAudioTracks);
 ```
 
 The application retains the raw stream if it needs to use or stop it later;
 Recorder does not expose that browser resource through its Controller. An
 accepted supplied source must contain exactly one live audio track. Video tracks
 are ignored, and a live audio track remains valid when browser-muted or
-application-disabled. Recorder creates an audio-only recording view and never
-calls `stop()` on the supplied track during completion, discard, startup or
-runtime failure, or unmount.
+application-disabled. Recorder creates an audio-only recording view. The default
+`PreserveTracks` agreement never calls `stop()` on the supplied track.
+`StopAudioTracks` explicitly authorizes Recorder to stop the accepted audio
+track exactly once during terminal cleanup, including completion, discard,
+failure, source end, and unmount. Do not grant that authority unless every
+consumer of the shared track may be stopped.
+
+`recorder.source_availability()` reports `Live` or `Interrupted` independently
+from whether Recording is paused while a source is active. Browser mute and
+unmute events update availability without pausing elapsed time. Recorder does not poll
+or change the track's application-controlled `enabled` state. If the track ends
+while Recording or paused, Recorder finalizes valid partial Recorded Audio;
+`RecordingOutcome::Completed` identifies `SourceEnded` separately from
+`Requested` and `UnexpectedEnd` completion.
 
 Capture constraints, microphone permission requests, effective acquired-source
 settings, and Audio Input Device identity apply only to `recorder.start()`.

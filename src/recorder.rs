@@ -6,6 +6,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use dioxus::prelude::*;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use wasm_bindgen::JsCast;
 
 use crate::AudioError;
 use crate::analysis::AudioAnalyser;
@@ -17,13 +19,14 @@ mod web;
 
 /// An opaque, application-supplied live audio source.
 ///
-/// Recorder snapshots exactly one live audio track when
-/// [`AudioRecorder::start_with_source`] accepts a Recording. The track is
-/// preserved through completion, discard, failure, and Recorder cleanup.
+/// Recorder snapshots exactly one live audio track and its shutdown agreement
+/// when [`AudioRecorder::start_with_source`] accepts a Recording. The default
+/// agreement preserves the track.
 #[derive(Clone)]
 pub struct RecordingSource {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     stream: web_sys::MediaStream,
+    shutdown: RecordingSourceShutdown,
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     _unsupported: (),
 }
@@ -32,8 +35,28 @@ impl fmt::Debug for RecordingSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RecordingSource")
+            .field("shutdown", &self.shutdown)
             .finish_non_exhaustive()
     }
+}
+
+/// Authority granted to Recorder for an accepted supplied Recording Source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RecordingSourceShutdown {
+    /// Leave the accepted audio track under application control.
+    #[default]
+    PreserveTracks,
+    /// Stop the accepted audio track when Recorder cleans up the Recording.
+    ///
+    /// Stopping a shared track affects every consumer of that track.
+    StopAudioTracks,
+}
+
+/// Browser-reported availability of the accepted Recording Source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingSourceAvailability {
+    Live,
+    Interrupted,
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -42,8 +65,19 @@ impl RecordingSource {
     ///
     /// The raw stream remains application-owned and is not exposed again by
     /// Recorder. Source validation occurs when a Recording is started.
-    pub fn from_media_stream(stream: web_sys::MediaStream) -> Self {
-        Self { stream }
+    pub fn from_media_stream(stream: &web_sys::MediaStream) -> Self {
+        Self {
+            stream: <web_sys::MediaStream as AsRef<wasm_bindgen::JsValue>>::as_ref(stream)
+                .clone()
+                .unchecked_into(),
+            shutdown: RecordingSourceShutdown::PreserveTracks,
+        }
+    }
+
+    /// Set the shutdown authority snapshotted when Recorder accepts a start.
+    pub fn with_shutdown(mut self, shutdown: RecordingSourceShutdown) -> Self {
+        self.shutdown = shutdown;
+        self
     }
 }
 
@@ -64,11 +98,47 @@ pub enum CompletionDisposition {
     Discard,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordingTerminalIntent {
+    Save(RecordingCompletionCause),
+    Discard,
+}
+
+impl RecordingTerminalIntent {
+    fn disposition(self) -> CompletionDisposition {
+        match self {
+            Self::Save(_) => CompletionDisposition::Save,
+            Self::Discard => CompletionDisposition::Discard,
+        }
+    }
+
+    fn completion_cause(self) -> Option<RecordingCompletionCause> {
+        match self {
+            Self::Save(cause) => Some(cause),
+            Self::Discard => None,
+        }
+    }
+}
+
+/// Why a Recording completed with Recorded Audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordingCompletionCause {
+    /// The application requested completion.
+    Requested,
+    /// The accepted Recording Source ended externally.
+    SourceEnded,
+    /// The Recording ended without an earlier application or source intent.
+    UnexpectedEnd,
+}
+
 /// The terminal outcome of an accepted Recording.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecordingOutcome {
-    Completed(RecordingId),
+    Completed {
+        recording_id: RecordingId,
+        cause: RecordingCompletionCause,
+    },
     Discarded(RecordingId),
     Failed {
         recording_id: RecordingId,
@@ -79,7 +149,7 @@ pub enum RecordingOutcome {
 impl RecordingOutcome {
     pub fn recording_id(&self) -> RecordingId {
         match self {
-            Self::Completed(recording_id) | Self::Discarded(recording_id) => *recording_id,
+            Self::Completed { recording_id, .. } | Self::Discarded(recording_id) => *recording_id,
             Self::Failed { recording_id, .. } => *recording_id,
         }
     }
@@ -135,7 +205,7 @@ pub struct RecorderLifecycle {
     generation: u64,
     active_recording: Option<RecordingId>,
     next_chunk_sequence: u64,
-    completion: CompletionDisposition,
+    terminal_intent: RecordingTerminalIntent,
     finalizing: bool,
     has_unconsumed_recording: bool,
 }
@@ -147,7 +217,7 @@ impl Default for RecorderLifecycle {
             generation: 0,
             active_recording: None,
             next_chunk_sequence: 0,
-            completion: CompletionDisposition::Save,
+            terminal_intent: RecordingTerminalIntent::Save(RecordingCompletionCause::Requested),
             finalizing: false,
             has_unconsumed_recording: false,
         }
@@ -176,7 +246,7 @@ impl RecorderLifecycle {
         let recording_id = RecordingId::from_generation(self.generation);
         self.active_recording = Some(recording_id);
         self.next_chunk_sequence = 0;
-        self.completion = CompletionDisposition::Save;
+        self.terminal_intent = RecordingTerminalIntent::Save(RecordingCompletionCause::Requested);
         self.finalizing = false;
         self.status = RecorderStatus::Preparing;
         Ok(recording_id)
@@ -203,9 +273,29 @@ impl RecorderLifecycle {
             ));
         }
 
-        self.completion = CompletionDisposition::Save;
+        self.terminal_intent = RecordingTerminalIntent::Save(RecordingCompletionCause::Requested);
         self.status = RecorderStatus::Stopping;
         Ok(())
+    }
+
+    /// Accept external Recording Source completion as the terminal intent.
+    pub fn source_ended(&mut self) -> bool {
+        if !matches!(
+            self.status,
+            RecorderStatus::Recording | RecorderStatus::Paused
+        ) {
+            return false;
+        }
+
+        self.terminal_intent = RecordingTerminalIntent::Save(RecordingCompletionCause::SourceEnded);
+        self.status = RecorderStatus::Stopping;
+        true
+    }
+
+    pub fn completion_cause(&self, recording_id: RecordingId) -> Option<RecordingCompletionCause> {
+        (self.active_recording == Some(recording_id))
+            .then(|| self.terminal_intent.completion_cause())
+            .flatten()
     }
 
     pub fn pause(&mut self) -> Result<(), RecorderCommandError> {
@@ -244,7 +334,7 @@ impl RecorderLifecycle {
                 self.status,
                 RecorderStatus::Recording | RecorderStatus::Paused
             ) || (matches!(self.status, RecorderStatus::Stopping)
-                && self.completion == CompletionDisposition::Save));
+                && matches!(self.terminal_intent, RecordingTerminalIntent::Save(_))));
         if !accepts_chunk {
             return None;
         }
@@ -261,7 +351,7 @@ impl RecorderLifecycle {
                 self.status = RecorderStatus::Idle;
             }
             RecorderStatus::Recording | RecorderStatus::Paused => {
-                self.completion = CompletionDisposition::Discard;
+                self.terminal_intent = RecordingTerminalIntent::Discard;
                 self.status = RecorderStatus::Stopping;
             }
             _ => {
@@ -282,14 +372,15 @@ impl RecorderLifecycle {
         match self.status {
             RecorderStatus::Stopping => {}
             RecorderStatus::Recording | RecorderStatus::Paused => {
-                self.completion = CompletionDisposition::Save;
+                self.terminal_intent =
+                    RecordingTerminalIntent::Save(RecordingCompletionCause::UnexpectedEnd);
                 self.status = RecorderStatus::Stopping;
             }
             _ => return None,
         }
 
         self.finalizing = true;
-        Some(self.completion)
+        Some(self.terminal_intent.disposition())
     }
 
     pub fn complete_finalize(&mut self, recording_id: RecordingId) -> bool {
@@ -299,7 +390,8 @@ impl RecorderLifecycle {
 
         self.active_recording = None;
         self.finalizing = false;
-        self.has_unconsumed_recording = self.completion == CompletionDisposition::Save;
+        self.has_unconsumed_recording =
+            matches!(self.terminal_intent, RecordingTerminalIntent::Save(_));
         self.status = RecorderStatus::Idle;
         true
     }
@@ -511,6 +603,7 @@ pub struct AudioRecorder {
     completed: ReadSignal<Option<RecordedAudio>>,
     analyser: ReadSignal<Option<AudioAnalyser>>,
     elapsed: ReadSignal<Duration>,
+    source_availability: ReadSignal<Option<RecordingSourceAvailability>>,
     microphone: ReadSignal<MicrophoneStatus>,
     requested_constraints: ReadSignal<Option<RecordingConstraints>>,
     constraint_capabilities: ReadSignal<Option<RecorderConstraintCapabilities>>,
@@ -544,6 +637,15 @@ impl AudioRecorder {
 
     pub fn elapsed(self) -> ReadSignal<Duration> {
         self.elapsed
+    }
+
+    /// Browser-reported availability of the active Recording Source.
+    ///
+    /// Interruption does not pause Recording or elapsed time. This
+    /// observation does not inspect application control of the track's enabled
+    /// state.
+    pub fn source_availability(self) -> ReadSignal<Option<RecordingSourceAvailability>> {
+        self.source_availability
     }
 
     pub fn microphone(self) -> ReadSignal<MicrophoneStatus> {
@@ -670,6 +772,7 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
     let completed = use_signal(|| None::<RecordedAudio>);
     let analyser = use_signal(|| None::<AudioAnalyser>);
     let elapsed = use_signal(|| Duration::ZERO);
+    let source_availability = use_signal(|| None::<RecordingSourceAvailability>);
     let requested_constraints = use_signal(|| None::<RecordingConstraints>);
     let constraint_capabilities = use_signal(|| None::<RecorderConstraintCapabilities>);
     let settings = use_signal(|| None::<RecordingSourceSettings>);
@@ -713,6 +816,7 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
         completed: completed.into(),
         analyser: analyser.into(),
         elapsed: elapsed.into(),
+        source_availability: source_availability.into(),
         microphone: microphone.into(),
         requested_constraints: requested_constraints.into(),
         constraint_capabilities: constraint_capabilities.into(),

@@ -9,8 +9,8 @@ use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
 use dioxus_audio::playback::PlaybackSource;
 use dioxus_audio::recorder::{
     RecorderOptions, RecorderStatus, RecordingChunkDelivery, RecordingConstraint,
-    RecordingConstraints, RecordingOutcome, RecordingSource, is_recorder_mime_type_supported,
-    use_audio_recorder,
+    RecordingConstraints, RecordingOutcome, RecordingSource, RecordingSourceShutdown,
+    is_recorder_mime_type_supported, use_audio_recorder,
 };
 use dioxus_audio::{RecordedAudio, RecordingChunk, RecordingId};
 use wasm_bindgen::JsCast;
@@ -96,6 +96,7 @@ fn RecorderPanel(
     let mut supplied_source_error = use_signal(|| None::<String>);
     let mut preparing_supplied_source = use_signal(|| false);
     let mut supplied_source_generation = use_signal(|| 0_u64);
+    let mut stop_supplied_track = use_signal(|| false);
     let sample_rate = if require_impossible_rate() {
         RecordingConstraint::Exact(1)
     } else {
@@ -168,7 +169,7 @@ fn RecorderPanel(
                         .write()
                         .push(format!("Failed | {recording_label} | {error}"));
                 }
-                RecordingOutcome::Completed(_) => {}
+                RecordingOutcome::Completed { .. } => {}
                 _ => {}
             }
         }
@@ -191,6 +192,19 @@ fn RecorderPanel(
     });
 
     let status = recorder.status()();
+    let source_availability = recorder
+        .source_availability()()
+        .map(|availability| format!("{availability:?}"))
+        .unwrap_or_else(|| "Unavailable".to_string());
+    let completion_cause = match recorder.outcome()() {
+        Some(RecordingOutcome::Completed { cause, .. }) => format!("{cause:?}"),
+        _ => "Unavailable".to_string(),
+    };
+    let future_source_shutdown = if stop_supplied_track() {
+        "StopAudioTracks"
+    } else {
+        "PreserveTracks"
+    };
     let custom_status = custom_recorder.status()();
     let active = recorder_active(&status) || recorder_active(&custom_status);
     let permission = devices.permission()();
@@ -258,8 +272,13 @@ fn RecorderPanel(
                             }
                             preparing_supplied_source.set(true);
                             supplied_source_error.set(None);
+                            let shutdown = if stop_supplied_track() {
+                                RecordingSourceShutdown::StopAudioTracks
+                            } else {
+                                RecordingSourceShutdown::PreserveTracks
+                            };
                             spawn(async move {
-                                match acquire_supplied_source().await {
+                                match acquire_supplied_source(shutdown).await {
                                     Ok(source) => {
                                         supplied_source.write().replace(source);
                                         supplied_source_generation += 1;
@@ -286,6 +305,17 @@ fn RecorderPanel(
                         "Start supplied recording"
                     }
                 }
+                label { class: "flex cursor-pointer items-center gap-3",
+                    input {
+                        class: "toggle toggle-primary toggle-sm",
+                        r#type: "checkbox",
+                        checked: stop_supplied_track(),
+                        disabled: active || preparing_supplied_source(),
+                        onchange: move |_| stop_supplied_track.toggle(),
+                    }
+                    "Stop supplied audio track on Recorder cleanup"
+                }
+                p { "Future supplied source shutdown: {future_source_shutdown}" }
                 p {
                     "data-generation": supplied_source_generation(),
                     if preparing_supplied_source() {
@@ -296,6 +326,8 @@ fn RecorderPanel(
                         "No supplied Recording Source"
                     }
                 }
+                p { "Recording Source availability: {source_availability}" }
+                p { "Recording completion cause: {completion_cause}" }
                 p { "Recorder microphone permission: {recorder_permission}" }
                 p { "Recorder input identity: {recorder_input_identity}" }
                 if let Some(error) = supplied_source_error() {
@@ -559,7 +591,9 @@ fn recognition(recognized: bool) -> &'static str {
     }
 }
 
-async fn acquire_supplied_source() -> Result<ApplicationRecordingSource, String> {
+async fn acquire_supplied_source(
+    shutdown: RecordingSourceShutdown,
+) -> Result<ApplicationRecordingSource, String> {
     let media_devices = web_sys::window()
         .ok_or_else(|| "browser window is unavailable".to_string())?
         .navigator()
@@ -578,7 +612,7 @@ async fn acquire_supplied_source() -> Result<ApplicationRecordingSource, String>
         .dyn_into::<web_sys::MediaStream>()
         .map_err(|_| "browser returned an invalid Recording Source".to_string())?;
     Ok(ApplicationRecordingSource {
-        recorder_source: RecordingSource::from_media_stream(stream.clone()),
+        recorder_source: RecordingSource::from_media_stream(&stream).with_shutdown(shutdown),
         stream,
     })
 }

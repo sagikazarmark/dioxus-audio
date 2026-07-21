@@ -3,12 +3,13 @@ use std::time::Duration;
 use dioxus::prelude::*;
 use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::playback::{
-    BoundedPlaybackFailure, BoundedPlaybackMode, BoundedPlaybackPhase,
-    PlaybackAudibilityCapability, PlaybackAudibilityLevel, PlaybackGraphState, PlaybackLifecycle,
-    PlaybackLoadingPolicy, PlaybackNetworkActivity, PlaybackOptions, PlaybackPlayFailure,
-    PlaybackReadiness, PlaybackSource, PlaybackSourceAlternative, PlaybackSourceCrossOrigin,
-    PlaybackSourceFailure, PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange,
-    PlaybackTransport, clamp_seek, use_audio_player, use_audio_player_with_options,
+    BoundedPlaybackEvent, BoundedPlaybackFailure, BoundedPlaybackMode, BoundedPlaybackPhase,
+    BoundedPlaybackRetarget, PlaybackAudibilityCapability, PlaybackAudibilityLevel,
+    PlaybackGraphState, PlaybackLifecycle, PlaybackLoadingPolicy, PlaybackNetworkActivity,
+    PlaybackOptions, PlaybackPlayFailure, PlaybackReadiness, PlaybackSource,
+    PlaybackSourceAlternative, PlaybackSourceCrossOrigin, PlaybackSourceFailure,
+    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange, PlaybackTransport, clamp_seek,
+    use_audio_player, use_audio_player_with_options,
 };
 use dioxus_audio::{AudioData, AudioError, AudioErrorKind};
 
@@ -405,6 +406,105 @@ fn bounded_playback_waits_for_seek_and_play_confirmation_before_becoming_active(
 }
 
 #[test]
+fn bounded_loop_is_independent_from_whole_source_repeat() {
+    let selection = WaveformSelection::new(5.0, 10.0);
+    let mut playback = PlaybackLifecycle::default();
+    playback.set_repeat(true);
+    playback.loaded();
+
+    playback.start_bounded_loop(selection, 30.0).unwrap();
+
+    let bounded = playback.bounded().expect("bounded loop");
+    assert_eq!(bounded.range, selection);
+    assert_eq!(bounded.mode, BoundedPlaybackMode::Loop);
+    assert_eq!(bounded.phase, BoundedPlaybackPhase::Seeking);
+    assert_eq!(
+        playback.snapshot().bounded_event,
+        Some(BoundedPlaybackEvent::Started(BoundedPlaybackMode::Loop))
+    );
+    assert!(playback.repeat());
+}
+
+#[test]
+fn active_bounded_playback_retargets_in_place_or_prepares_a_seek() {
+    let mut playback = PlaybackLifecycle::default();
+    playback.loaded();
+    playback
+        .start_bounded_loop(WaveformSelection::new(5.0, 10.0), 30.0)
+        .unwrap();
+    playback.request_play().unwrap();
+    playback.bounded_activating();
+    playback.playing();
+    playback.bounded_active();
+
+    let retarget = playback
+        .retarget_bounded(WaveformSelection::new(6.0, 12.0), 30.0, 7.0)
+        .unwrap();
+    assert_eq!(retarget, BoundedPlaybackRetarget::PreservePosition);
+    assert_eq!(playback.transport(), PlaybackTransport::Playing);
+    assert_eq!(
+        playback.bounded(),
+        Some(&dioxus_audio::playback::BoundedPlaybackSnapshot {
+            range: WaveformSelection::new(6.0, 12.0),
+            mode: BoundedPlaybackMode::Loop,
+            phase: BoundedPlaybackPhase::Active,
+        })
+    );
+
+    let retarget = playback
+        .retarget_bounded(WaveformSelection::new(15.0, 20.0), 30.0, 7.0)
+        .unwrap();
+    assert_eq!(retarget, BoundedPlaybackRetarget::SeekToStart);
+    assert_eq!(
+        playback.bounded().map(|bounded| bounded.phase),
+        Some(BoundedPlaybackPhase::Retargeting)
+    );
+
+    let retargeting = *playback.bounded().expect("retargeting operation");
+    assert!(
+        playback
+            .retarget_bounded(WaveformSelection::new(18.0, 18.0), 30.0, 7.0)
+            .is_err()
+    );
+    assert_eq!(playback.bounded(), Some(&retargeting));
+}
+
+#[test]
+fn bounded_loop_wraps_before_waiting_for_reactivation() {
+    let selection = WaveformSelection::new(5.0, 10.0);
+    let mut playback = PlaybackLifecycle::default();
+    playback.loaded();
+    playback.start_bounded_loop(selection, 30.0).unwrap();
+    playback.request_play().unwrap();
+    playback.bounded_activating();
+    playback.playing();
+    playback.bounded_active();
+
+    playback.paused();
+    playback.bounded_wrapping();
+    assert_eq!(
+        playback.bounded().map(|bounded| bounded.phase),
+        Some(BoundedPlaybackPhase::Wrapping)
+    );
+
+    playback.request_play().unwrap();
+    playback.bounded_activating();
+    playback.playing();
+    playback.bounded_active();
+    assert_eq!(
+        playback.bounded().map(|bounded| bounded.phase),
+        Some(BoundedPlaybackPhase::Active)
+    );
+
+    playback.stop().unwrap();
+    assert_eq!(playback.bounded(), None);
+    assert_eq!(
+        playback.snapshot().bounded_event,
+        Some(BoundedPlaybackEvent::Cancelled)
+    );
+}
+
+#[test]
 fn bounded_failure_is_isolated_and_source_changes_clear_the_operation() {
     let selection = WaveformSelection::new(5.0, 10.0);
     let mut playback = PlaybackLifecycle::default();
@@ -428,6 +528,10 @@ fn bounded_failure_is_isolated_and_source_changes_clear_the_operation() {
     playback.start_bounded_once(selection, 30.0).unwrap();
     playback.loading();
     assert_eq!(playback.bounded(), None);
+    assert_eq!(
+        playback.snapshot().bounded_event,
+        Some(BoundedPlaybackEvent::Cancelled)
+    );
 
     playback.loaded();
     playback.start_bounded_once(selection, 30.0).unwrap();

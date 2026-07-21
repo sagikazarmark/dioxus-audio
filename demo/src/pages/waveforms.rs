@@ -10,7 +10,7 @@ pub fn Waveforms() -> Element {
         PageHeader {
             eyebrow: "Processing",
             title: "Preview and select waveform ranges",
-            intro: "Render duration-aware magnitude or signed multichannel Waveform Data, then seek Playback, edit a controlled Waveform Selection, and play a valid selection once.",
+            intro: "Render duration-aware magnitude or signed multichannel Waveform Data, then seek Playback, edit a controlled Waveform Selection, and play or loop a valid selection.",
         }
         ExampleSection {
             title: "Waveform components",
@@ -24,7 +24,9 @@ pub fn Waveforms() -> Element {
                 InlineCode { "InteractiveWaveform" }
                 " adds three independently named native sliders with keyboard and pointer operation. "
                 InlineCode { "play_bounded_once" }
-                " pause-seeks before requesting play and exposes its lifecycle independently. Operation ordering is guaranteed; audible boundary timing is best-effort, not sample-accurate, and has no maximum overshoot promise."
+                " and "
+                InlineCode { "play_bounded_loop" }
+                " pause-seek before requesting play and expose their lifecycle independently. Committed selection edits retarget an enforcing run, while a late hidden loop restarts once from its range start. Operation ordering is guaranteed; audible boundary timing is best-effort, not sample-accurate or gapless, and has no maximum overshoot promise."
             },
             demo: rsx! { WaveformsExample {} },
             code: rsx! {

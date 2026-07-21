@@ -423,13 +423,16 @@ invalidates an outstanding play request, and returns a loaded source to
 source is replaced or unloaded and applies to the next loaded source. It is
 separate from Bounded Playback over a Waveform Selection.
 
-Use `play_bounded_once()` to play one controlled `WaveformSelection` once:
+Use `play_bounded_once()` or `play_bounded_loop()` to play one controlled
+`WaveformSelection` once or repeatedly:
 
 ```rust
 use dioxus_audio::analysis::WaveformSelection;
 
 let selection = WaveformSelection::new(12.5, 18.0);
 controller.play_bounded_once(selection)?;
+// Or repeatedly enforce the range independently from whole-source repeat.
+controller.play_bounded_loop(selection)?;
 # Ok::<(), dioxus_audio::playback::PlaybackCommandError>(())
 ```
 
@@ -440,20 +443,36 @@ not make a duration authoritative. A valid run pauses, seeks to the selection
 start, waits for the correlated `seeked` outcome, requests play, and waits for
 browser confirmation before `PlaybackSnapshot::bounded` becomes `Active`.
 
-Ordinary `pause()` preserves the bounded range and `play()` resumes it. An
-ordinary `seek()` or `skip()` cancels boundary enforcement without changing the
-application-owned Waveform Selection. `cancel_bounded_playback()` explicitly
-removes the bound, while source replacement, unload, stop, and owner cleanup
-clear it and invalidate late seek, play, pause, and deadline outcomes. At the
-one-shot end, Playback pauses, observable position is clamped to the exact
-selection end, and the bounded phase becomes `Completed`. Seek timeout or play
-activation rejection becomes a bounded `Failed` phase without failing the
-Playback Source, so ordinary Playback remains available.
+Ordinary `pause()` preserves the bounded range and `play()` resumes it. A
+committed `InteractiveWaveform` selection edit automatically retargets an
+enforcing run. `retarget_bounded_playback()` provides the same operation for
+other controlled selection UIs: it keeps the current media position when that
+position remains in the replacement range, or pause-seeks to the new start and
+waits for the correlated seek before optionally resuming.
+
+An ordinary `seek()` or `skip()` cancels boundary enforcement without changing
+the application-owned Waveform Selection. `cancel_bounded_playback()` explicitly
+cancels the bound, while a new bounded run, another retarget, source replacement,
+unload, stop, and owner cleanup invalidate superseded seek, play, pause, and
+deadline outcomes. At the one-shot end, Playback pauses, observable position is
+clamped to the exact selection end, and the bounded phase becomes `Completed`.
+At a loop end, Playback enters `Wrapping`, pauses, seeks to the range start,
+waits for that seek, and requests play again. Whole-source `repeat()` remains a
+separate preference and native whole-source looping stays disabled while a bound
+is enforcing. Seek timeout or play activation rejection becomes a bounded
+`Failed` phase without failing the Playback Source, so ordinary Playback remains
+available.
+
+Media observations and a playback-rate-adjusted deadline both enforce the
+boundary. Rate changes re-arm that deadline, and visibility restoration samples
+actual media time. If a hidden or throttled loop is observed late, Playback
+restarts once from the range start; it does not synthesize missed iterations or
+preserve modulo phase.
 
 Pause-seek-play ordering, lifecycle publication, completion clamping, and stale
 outcome rejection are Controller guarantees. Audible boundary timing is browser
-scheduling behavior: Bounded Playback is not sample-accurate and makes no
-maximum-overshoot promise.
+scheduling behavior: Bounded Playback is not sample-accurate, loop wraps are not
+gapless, and there is no maximum-overshoot promise.
 
 Mute is observable through `muted()` and can be changed with `set_muted()` or
 `toggle_muted()` without pausing Playback, seeking, or changing the retained
@@ -540,7 +559,11 @@ cycle are configurable. Mute and repeat use stable labels and native pressed
 state. The seek and audibility sliders expose meaningful value text, which can
 be replaced with localized `value_text`. `PlaybackStatusAnnouncer` is an optional
 polite live region for coarse lifecycle, waiting, stalled, and recovery changes.
-It never announces position, range snapshots, or audibility changes.
+During Bounded Playback it restricts messages to discrete start, completion,
+cancellation, useful wrapping, and failure transitions. It never announces
+position, range snapshots, selection drafts, or audibility changes. Bounded
+messages can be localized independently with
+`BoundedPlaybackAnnouncementLabels`.
 
 ## Waveform Data
 
@@ -590,6 +613,10 @@ but do not cross or exchange identity.
 
 Pointer movement is shown as an internal draft. A handle drag commits one
 selection update on release, while a track click seeks Playback immediately.
+Committed handle edits atomically retarget an enforcing Bounded Playback run;
+draft movement does not issue transport commands. A collapsed or otherwise
+unplayable committed selection cancels the old enforcement rather than leaving
+it attached to selection state that is no longer visible.
 Waveform duration determines rendering and selection bounds; a seek is capped
 by the Controller's authoritative positive Playback duration. Continuously
 changing position and drafts are not live-region announcements, so native

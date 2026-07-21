@@ -10,9 +10,10 @@ mod waveform;
 
 pub use devices::{AudioInputSelector, MicrophoneStatusIndicator};
 pub use player::{
-    AudioPlayer, PlaybackAnnouncementLabels, PlaybackAudibilitySlider, PlaybackMuteButton,
-    PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton, PlaybackSeekSlider,
-    PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton,
+    AudioPlayer, BoundedPlaybackAnnouncementLabels, PlaybackAnnouncementLabels,
+    PlaybackAudibilitySlider, PlaybackMuteButton, PlaybackPlayPauseButton, PlaybackRateButton,
+    PlaybackRepeatButton, PlaybackSeekSlider, PlaybackSkipButton, PlaybackStatusAnnouncer,
+    PlaybackStopButton,
 };
 pub use recorder::{
     RecorderAnnouncementLabels, RecorderCancelButton, RecorderClearButton, RecorderControls,

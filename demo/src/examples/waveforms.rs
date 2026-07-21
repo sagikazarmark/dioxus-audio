@@ -4,11 +4,12 @@ use dioxus::prelude::*;
 use dioxus_audio::AudioData;
 use dioxus_audio::analysis::WaveformSelection;
 use dioxus_audio::components::{
-    InteractiveWaveform, Waveform, WaveformPreview, WaveformRangeSelector,
+    InteractiveWaveform, PlaybackStatusAnnouncer, Waveform, WaveformPreview,
+    WaveformRangeSelector,
 };
 use dioxus_audio::playback::{
-    BoundedPlaybackFailure, BoundedPlaybackPhase, PlaybackSource, PlaybackSourceLifecycle,
-    PlaybackTransport, use_audio_player,
+    BoundedPlaybackFailure, BoundedPlaybackMode, BoundedPlaybackPhase, PlaybackSource,
+    PlaybackSourceLifecycle, PlaybackTransport, use_audio_player,
 };
 use dioxus_audio::waveform::{SignedEnvelope, WaveformData, WaveformLevel};
 
@@ -184,6 +185,19 @@ pub fn WaveformsExample() -> Element {
                             "Play short selection once"
                         }
                         button {
+                            class: "btn btn-primary btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                short_bounded_error.set(
+                                    short_controller
+                                        .play_bounded_loop(short_selection())
+                                        .err()
+                                        .map(|error| error.to_string()),
+                                );
+                            },
+                            "Loop short selection"
+                        }
+                        button {
                             class: "btn btn-ghost btn-sm",
                             r#type: "button",
                             onclick: move |_| {
@@ -212,6 +226,33 @@ pub fn WaveformsExample() -> Element {
                         button {
                             class: "btn btn-ghost btn-sm",
                             r#type: "button",
+                            onclick: move |_| {
+                                short_bounded_error.set(
+                                    short_controller.stop().err().map(|error| error.to_string()),
+                                );
+                            },
+                            "Stop short Playback"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                short_bounded_error.set(
+                                    short_controller.set_rate(2.0).err().map(|error| error.to_string()),
+                                );
+                            },
+                            "Set short Playback to 2x"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            aria_pressed: short_snapshot.repeat,
+                            onclick: move |_| short_controller.toggle_repeat(),
+                            "Toggle short whole-source repeat"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
                             onclick: move |_| short_controller.seek(Duration::from_secs(1)),
                             "Seek short Playback directly"
                         }
@@ -233,9 +274,12 @@ pub fn WaveformsExample() -> Element {
                     output {
                         class: "short-bounded-playback-state mt-2 block text-center text-xs text-base-content/60",
                         "data-phase": bounded_phase_name(short_snapshot.bounded.as_ref()),
+                        "data-mode": bounded_mode_name(short_snapshot.bounded.as_ref()),
                         "data-failure": bounded_failure_name(short_snapshot.bounded.as_ref()),
                         "data-source": source_lifecycle_name(&short_snapshot.source),
                         "data-transport": transport_name(short_snapshot.transport),
+                        "data-repeat": short_snapshot.repeat,
+                        "data-rate": short_controller.rate()().to_string(),
                         "data-position": short_controller.position()().as_secs_f64().to_string(),
                         if let Some(error) = short_bounded_error() {
                             span { role: "alert", "{error}" }
@@ -243,6 +287,7 @@ pub fn WaveformsExample() -> Element {
                             span { "Bounded Playback for short selection: {bounded_phase_name(short_snapshot.bounded.as_ref())}" }
                         }
                     }
+                    PlaybackStatusAnnouncer { controller: short_controller }
                 }
             }
         }
@@ -273,8 +318,22 @@ fn bounded_phase_name(
         Some(BoundedPlaybackPhase::Activating) => "activating",
         Some(BoundedPlaybackPhase::Active) => "active",
         Some(BoundedPlaybackPhase::Paused) => "paused",
+        Some(BoundedPlaybackPhase::Retargeting) => "retargeting",
+        Some(BoundedPlaybackPhase::Wrapping) => "wrapping",
         Some(BoundedPlaybackPhase::Completed) => "completed",
+        Some(BoundedPlaybackPhase::Cancelled) => "cancelled",
         Some(BoundedPlaybackPhase::Failed(_)) => "failed",
+        Some(_) => "unknown",
+    }
+}
+
+fn bounded_mode_name(
+    bounded: Option<&dioxus_audio::playback::BoundedPlaybackSnapshot>,
+) -> &'static str {
+    match bounded.map(|bounded| bounded.mode) {
+        None => "none",
+        Some(BoundedPlaybackMode::Once) => "once",
+        Some(BoundedPlaybackMode::Loop) => "loop",
         Some(_) => "unknown",
     }
 }

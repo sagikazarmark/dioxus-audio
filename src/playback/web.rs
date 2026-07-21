@@ -9,8 +9,8 @@ use js_sys::Uint8Array;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{
-    AudioContext, AudioContextState, GainNode, HtmlAudioElement, MediaElementAudioSourceNode,
-    TimeRanges, Url,
+    AudioContext, AudioContextState, Document, GainNode, HtmlAudioElement,
+    MediaElementAudioSourceNode, TimeRanges, Url,
 };
 
 use super::*;
@@ -129,12 +129,15 @@ pub(super) fn use_web_audio_player(
                     .bounded()
                     .is_some_and(|bounded| bounded.phase.is_enforcing())
             {
-                runtime
-                    .pending_bounded_seek
-                    .as_mut()
-                    .expect("pending seek was just checked")
-                    .resume_after = true;
-                runtime.lifecycle.bounded_seeking();
+                let purpose = {
+                    let pending = runtime
+                        .pending_bounded_seek
+                        .as_mut()
+                        .expect("pending seek was just checked");
+                    pending.resume_after = true;
+                    pending.purpose
+                };
+                runtime.set_bounded_seek_phase(purpose);
                 ControllerPlayAction::AwaitSeek
             } else if let Some(bounded) = runtime.lifecycle.bounded().copied()
                 && bounded.phase == BoundedPlaybackPhase::Paused
@@ -153,10 +156,14 @@ pub(super) fn use_web_audio_player(
                     }
                 } else {
                     let element = resource.element.clone();
-                    let operation = runtime.queue_bounded_seek(bounded.range.start(), true)?;
+                    let token = runtime.queue_bounded_seek(
+                        bounded.range.start(),
+                        true,
+                        BoundedSeekPurpose::Start,
+                    )?;
                     ControllerPlayAction::Seek {
                         element,
-                        operation,
+                        token,
                         target: bounded.range.start(),
                     }
                 }
@@ -164,7 +171,9 @@ pub(super) fn use_web_audio_player(
                 if runtime.lifecycle.bounded().is_some_and(|bounded| {
                     matches!(
                         bounded.phase,
-                        BoundedPlaybackPhase::Completed | BoundedPlaybackPhase::Failed(_)
+                        BoundedPlaybackPhase::Completed
+                            | BoundedPlaybackPhase::Cancelled
+                            | BoundedPlaybackPhase::Failed(_)
                     )
                 }) {
                     runtime.invalidate_bounded_operation();
@@ -187,12 +196,12 @@ pub(super) fn use_web_audio_player(
             ControllerPlayAction::AwaitSeek => {}
             ControllerPlayAction::Seek {
                 element,
-                operation,
+                token,
                 target,
             } => {
                 if element.pause().is_err() {
                     let mut runtime = runtime_for_play.borrow_mut();
-                    if runtime.is_current_bounded(operation) {
+                    if runtime.is_current_bounded_seek(token) {
                         runtime.pending_bounded_seek = None;
                         runtime
                             .lifecycle
@@ -205,11 +214,9 @@ pub(super) fn use_web_audio_player(
                 element.set_current_time(target);
                 schedule_bounded_seek_timeout(
                     Rc::downgrade(&runtime_for_play),
-                    operation,
+                    token,
                     status,
                     snapshot,
-                    dioxus_runtime_for_play.clone(),
-                    dioxus_scope,
                 );
             }
             ControllerPlayAction::Attach {
@@ -410,26 +417,37 @@ pub(super) fn use_web_audio_player(
         });
 
     let runtime_for_bounded = runtime.clone();
-    let dioxus_runtime_for_bounded = dioxus_runtime.clone();
-    let play_bounded_once: Callback<WaveformSelection, Result<(), PlaybackCommandError>> =
-        use_callback(move |selection: WaveformSelection| {
-            let (element, operation) = {
+    let play_bounded: Callback<
+        (WaveformSelection, BoundedPlaybackMode),
+        Result<(), PlaybackCommandError>,
+    > = use_callback(
+        move |(selection, mode): (WaveformSelection, BoundedPlaybackMode)| {
+            let (element, token) = {
                 let mut runtime = runtime_for_bounded.borrow_mut();
                 let duration_secs = runtime.authoritative_duration.ok_or(PlaybackCommandError(
                     "authoritative audio duration is unavailable",
                 ))?;
-                runtime
-                    .lifecycle
-                    .start_bounded_once(selection, duration_secs)?;
+                match mode {
+                    BoundedPlaybackMode::Once => runtime
+                        .lifecycle
+                        .start_bounded_once(selection, duration_secs)?,
+                    BoundedPlaybackMode::Loop => runtime
+                        .lifecycle
+                        .start_bounded_loop(selection, duration_secs)?,
+                }
                 runtime.play_generation.advance();
                 runtime.begin_bounded_operation();
-                let operation = runtime.queue_bounded_seek(selection.start(), true)?;
+                let token = runtime.queue_bounded_seek(
+                    selection.start(),
+                    true,
+                    BoundedSeekPurpose::Start,
+                )?;
                 let element = runtime
                     .resource
                     .as_ref()
                     .map(|resource| resource.element.clone())
                     .ok_or(PlaybackCommandError("audio is not loaded"))?;
-                (element, operation)
+                (element, token)
             };
 
             if element.pause().is_err() {
@@ -451,12 +469,153 @@ pub(super) fn use_web_audio_player(
             publish_lifecycle(&runtime_for_bounded.borrow().lifecycle, status, snapshot);
             schedule_bounded_seek_timeout(
                 Rc::downgrade(&runtime_for_bounded),
-                operation,
+                token,
                 status,
                 snapshot,
-                dioxus_runtime_for_bounded.clone(),
-                dioxus_scope,
             );
+            Ok(())
+        },
+    );
+
+    let runtime_for_retarget = runtime.clone();
+    let retarget_bounded: Callback<WaveformSelection, Result<(), PlaybackCommandError>> =
+        use_callback(move |selection: WaveformSelection| {
+            let action = {
+                let mut runtime = runtime_for_retarget.borrow_mut();
+                let duration_secs = runtime.authoritative_duration.ok_or(PlaybackCommandError(
+                    "authoritative audio duration is unavailable",
+                ))?;
+                let element = runtime
+                    .resource
+                    .as_ref()
+                    .map(|resource| resource.element.clone())
+                    .ok_or(PlaybackCommandError("audio is not loaded"))?;
+                let current_position = element.current_time();
+                let pending_resume = runtime
+                    .pending_bounded_seek
+                    .is_some_and(|pending| pending.resume_after);
+                let needs_seek_confirmation =
+                    runtime.pending_bounded_seek.is_some() || element.seeking();
+                let should_resume = matches!(
+                    runtime.lifecycle.transport(),
+                    PlaybackTransport::Playing | PlaybackTransport::PlayPending
+                ) || pending_resume;
+                let was_playing = runtime.lifecycle.transport() == PlaybackTransport::Playing;
+                let retarget = runtime.lifecycle.retarget_bounded(
+                    selection,
+                    duration_secs,
+                    current_position,
+                )?;
+
+                runtime.play_generation.advance();
+                let operation = runtime.begin_bounded_operation();
+                element.set_loop(false);
+                match retarget {
+                    BoundedPlaybackRetarget::PreservePosition if needs_seek_confirmation => {
+                        let token = runtime.queue_bounded_seek(
+                            current_position,
+                            should_resume,
+                            BoundedSeekPurpose::Retarget,
+                        )?;
+                        BoundedRetargetAction::Seek {
+                            element,
+                            token,
+                            target: current_position,
+                        }
+                    }
+                    BoundedPlaybackRetarget::PreservePosition if was_playing => {
+                        runtime.lifecycle.bounded_active();
+                        BoundedRetargetAction::Preserve { element, operation }
+                    }
+                    BoundedPlaybackRetarget::PreservePosition if should_resume => {
+                        runtime.lifecycle.paused();
+                        runtime.lifecycle.request_play()?;
+                        runtime.lifecycle.bounded_activating();
+                        runtime.play_generation.advance();
+                        BoundedRetargetAction::Restart { element, operation }
+                    }
+                    BoundedPlaybackRetarget::PreservePosition => {
+                        runtime.lifecycle.paused();
+                        runtime.lifecycle.bounded_paused();
+                        BoundedRetargetAction::StayPaused
+                    }
+                    BoundedPlaybackRetarget::SeekToStart => {
+                        let token = runtime.queue_bounded_seek(
+                            selection.start(),
+                            should_resume,
+                            BoundedSeekPurpose::Retarget,
+                        )?;
+                        BoundedRetargetAction::Seek {
+                            element,
+                            token,
+                            target: selection.start(),
+                        }
+                    }
+                }
+            };
+
+            match action {
+                BoundedRetargetAction::Preserve { element, operation } => {
+                    publish_lifecycle(&runtime_for_retarget.borrow().lifecycle, status, snapshot);
+                    schedule_bounded_deadline(
+                        Rc::downgrade(&runtime_for_retarget),
+                        operation,
+                        element,
+                        position,
+                        status,
+                        snapshot,
+                    );
+                }
+                BoundedRetargetAction::Restart { element, operation } => {
+                    if element.pause().is_err() {
+                        fail_bounded_pause(
+                            &runtime_for_retarget,
+                            operation,
+                            &element,
+                            status,
+                            snapshot,
+                        );
+                        return Err(PlaybackCommandError("browser rejected bounded pause"));
+                    }
+                    publish_lifecycle(&runtime_for_retarget.borrow().lifecycle, status, snapshot);
+                    play_current_resource(&runtime_for_retarget, status, snapshot, position)?;
+                }
+                BoundedRetargetAction::Seek {
+                    element,
+                    token,
+                    target,
+                } => {
+                    if element.pause().is_err() {
+                        fail_bounded_pause(
+                            &runtime_for_retarget,
+                            token.operation,
+                            &element,
+                            status,
+                            snapshot,
+                        );
+                        return Err(PlaybackCommandError("browser rejected bounded pause"));
+                    }
+                    {
+                        let mut runtime = runtime_for_retarget.borrow_mut();
+                        if !runtime.is_current_bounded_seek(token) {
+                            return Ok(());
+                        }
+                        runtime.lifecycle.paused();
+                        runtime.lifecycle.bounded_retargeting();
+                    }
+                    element.set_current_time(target);
+                    publish_lifecycle(&runtime_for_retarget.borrow().lifecycle, status, snapshot);
+                    schedule_bounded_seek_timeout(
+                        Rc::downgrade(&runtime_for_retarget),
+                        token,
+                        status,
+                        snapshot,
+                    );
+                }
+                BoundedRetargetAction::StayPaused => {
+                    publish_lifecycle(&runtime_for_retarget.borrow().lifecycle, status, snapshot);
+                }
+            }
             Ok(())
         });
 
@@ -468,7 +627,6 @@ pub(super) fn use_web_audio_player(
             .resource
             .as_ref()
             .map(|resource| resource.element.clone());
-        runtime.invalidate_bounded_operation();
         if cancel_pending_play {
             runtime.play_generation.advance();
             if let Some(element) = element.as_ref() {
@@ -476,6 +634,7 @@ pub(super) fn use_web_audio_player(
             }
             runtime.lifecycle.paused();
         }
+        runtime.cancel_bounded_operation();
         if let Some(element) = element {
             element.set_loop(runtime.lifecycle.repeat());
         }
@@ -494,7 +653,8 @@ pub(super) fn use_web_audio_player(
         stop,
         seek,
         skip,
-        play_bounded_once,
+        play_bounded,
+        retarget_bounded,
         cancel_bounded,
         set_rate,
         set_repeat,
@@ -521,14 +681,15 @@ fn seek_current_resource(
     };
     let cancel_pending_play = runtime.lifecycle.transport() == PlaybackTransport::PlayPending
         && runtime.lifecycle.bounded().is_some();
-    if runtime.lifecycle.bounded().is_some() {
-        runtime.invalidate_bounded_operation();
-        element.set_loop(runtime.lifecycle.repeat());
-    }
+    let cancel_bounded = runtime.lifecycle.bounded().is_some();
     if cancel_pending_play {
         runtime.play_generation.advance();
         let _ = element.pause();
         runtime.lifecycle.paused();
+    }
+    if cancel_bounded {
+        runtime.invalidate_bounded_operation();
+        element.set_loop(runtime.lifecycle.repeat());
     }
     element.set_current_time(seconds);
     position.set(Duration::from_secs_f64(seconds));
@@ -573,6 +734,15 @@ impl BoundedGeneration {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SeekGeneration(u64);
+
+impl SeekGeneration {
+    fn advance(&mut self) {
+        self.0 = self.0.wrapping_add(1);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DeadlineGeneration(u64);
 
 impl DeadlineGeneration {
@@ -593,10 +763,24 @@ struct BoundedOperation {
     operation: BoundedGeneration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BoundedSeek {
+    operation: BoundedOperation,
+    seek: SeekGeneration,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoundedSeekPurpose {
+    Start,
+    Retarget,
+    Wrap,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PendingBoundedSeek {
-    operation: BoundedOperation,
+    token: BoundedSeek,
     target: f64,
+    purpose: BoundedSeekPurpose,
     resume_after: bool,
 }
 
@@ -604,7 +788,7 @@ enum ControllerPlayAction {
     AwaitSeek,
     Seek {
         element: HtmlAudioElement,
-        operation: BoundedOperation,
+        token: BoundedSeek,
         target: f64,
     },
     Attach {
@@ -614,6 +798,23 @@ enum ControllerPlayAction {
     Play {
         restart_ended: bool,
     },
+}
+
+enum BoundedRetargetAction {
+    Preserve {
+        element: HtmlAudioElement,
+        operation: BoundedOperation,
+    },
+    Restart {
+        element: HtmlAudioElement,
+        operation: BoundedOperation,
+    },
+    Seek {
+        element: HtmlAudioElement,
+        token: BoundedSeek,
+        target: f64,
+    },
+    StayPaused,
 }
 
 struct PlayerRuntime {
@@ -626,6 +827,7 @@ struct PlayerRuntime {
     attempt_generation: AttemptGeneration,
     play_generation: PlayGeneration,
     bounded_generation: BoundedGeneration,
+    seek_generation: SeekGeneration,
     deadline_generation: DeadlineGeneration,
     bounded_operation: Option<BoundedOperation>,
     pending_bounded_seek: Option<PendingBoundedSeek>,
@@ -732,6 +934,7 @@ impl PlayerRuntime {
             attempt_generation: AttemptGeneration::default(),
             play_generation: PlayGeneration::default(),
             bounded_generation: BoundedGeneration::default(),
+            seek_generation: SeekGeneration::default(),
             deadline_generation: DeadlineGeneration::default(),
             bounded_operation: None,
             pending_bounded_seek: None,
@@ -773,8 +976,17 @@ impl PlayerRuntime {
             && self.bounded_operation == Some(operation)
     }
 
+    fn is_current_bounded_seek(&self, token: BoundedSeek) -> bool {
+        self.is_current_bounded(token.operation)
+            && self.seek_generation == token.seek
+            && self
+                .pending_bounded_seek
+                .is_some_and(|pending| pending.token == token)
+    }
+
     fn begin_bounded_operation(&mut self) -> BoundedOperation {
         self.bounded_generation.advance();
+        self.seek_generation.advance();
         self.deadline_generation.advance();
         self.pending_bounded_seek = None;
         let operation = BoundedOperation {
@@ -789,19 +1001,34 @@ impl PlayerRuntime {
         &mut self,
         target: f64,
         resume_after: bool,
-    ) -> Result<BoundedOperation, PlaybackCommandError> {
+        purpose: BoundedSeekPurpose,
+    ) -> Result<BoundedSeek, PlaybackCommandError> {
         let operation = self
             .bounded_operation
             .ok_or(PlaybackCommandError("Bounded Playback is not active"))?;
         self.play_generation.advance();
+        self.seek_generation.advance();
         self.deadline_generation.advance();
-        self.pending_bounded_seek = Some(PendingBoundedSeek {
+        let token = BoundedSeek {
             operation,
+            seek: self.seek_generation,
+        };
+        self.pending_bounded_seek = Some(PendingBoundedSeek {
+            token,
             target,
+            purpose,
             resume_after,
         });
-        self.lifecycle.bounded_seeking();
-        Ok(operation)
+        self.set_bounded_seek_phase(purpose);
+        Ok(token)
+    }
+
+    fn set_bounded_seek_phase(&mut self, purpose: BoundedSeekPurpose) {
+        match purpose {
+            BoundedSeekPurpose::Start => self.lifecycle.bounded_seeking(),
+            BoundedSeekPurpose::Retarget => self.lifecycle.bounded_retargeting(),
+            BoundedSeekPurpose::Wrap => self.lifecycle.bounded_wrapping(),
+        }
     }
 
     fn active_bounded_operation(&self) -> Option<BoundedOperation> {
@@ -813,11 +1040,21 @@ impl PlayerRuntime {
     }
 
     fn invalidate_bounded_operation(&mut self) {
+        self.invalidate_bounded_work();
+        self.lifecycle.cancel_bounded();
+    }
+
+    fn cancel_bounded_operation(&mut self) {
+        self.invalidate_bounded_work();
+        self.lifecycle.bounded_cancelled();
+    }
+
+    fn invalidate_bounded_work(&mut self) {
         self.bounded_generation.advance();
+        self.seek_generation.advance();
         self.deadline_generation.advance();
         self.bounded_operation = None;
         self.pending_bounded_seek = None;
-        self.lifecycle.cancel_bounded();
     }
 
     fn advance_attempt(&mut self) -> AttemptGeneration {
@@ -1428,37 +1665,29 @@ fn reject_graph_activation(
 
 fn schedule_bounded_seek_timeout(
     runtime: Weak<RefCell<PlayerRuntime>>,
-    operation: BoundedOperation,
+    token: BoundedSeek,
     status: Signal<PlaybackStatus>,
     snapshot: Signal<PlaybackSnapshot>,
-    dioxus_runtime: Rc<DioxusRuntime>,
-    dioxus_scope: ScopeId,
 ) {
     wasm_bindgen_futures::spawn_local(async move {
         TimeoutFuture::new(BOUNDED_SEEK_TIMEOUT_MILLIS).await;
         let Some(runtime) = runtime.upgrade() else {
             return;
         };
-        dioxus_runtime.in_scope(dioxus_scope, || {
-            let mut runtime = runtime.borrow_mut();
-            if !runtime.is_current_bounded(operation)
-                || !runtime
-                    .pending_bounded_seek
-                    .is_some_and(|pending| pending.operation == operation)
-            {
-                return;
-            }
-            runtime.pending_bounded_seek = None;
-            runtime.play_generation.advance();
-            runtime.deadline_generation.advance();
-            runtime
-                .lifecycle
-                .bounded_failed(BoundedPlaybackFailure::SeekTimedOut);
-            if let Some(resource) = runtime.resource.as_ref() {
-                resource.element.set_loop(runtime.lifecycle.repeat());
-            }
-            publish_lifecycle(&runtime.lifecycle, status, snapshot);
-        });
+        let mut runtime = runtime.borrow_mut();
+        if !runtime.is_current_bounded_seek(token) {
+            return;
+        }
+        runtime.pending_bounded_seek = None;
+        runtime.play_generation.advance();
+        runtime.deadline_generation.advance();
+        runtime
+            .lifecycle
+            .bounded_failed(BoundedPlaybackFailure::SeekTimedOut);
+        if let Some(resource) = runtime.resource.as_ref() {
+            resource.element.set_loop(runtime.lifecycle.repeat());
+        }
+        publish_lifecycle(&runtime.lifecycle, status, snapshot);
     });
 }
 
@@ -1524,7 +1753,7 @@ fn schedule_bounded_deadline(
             .range
             .end();
         if element.current_time() >= end {
-            complete_bounded_playback(
+            reconcile_bounded_boundary(
                 &runtime_ref,
                 operation,
                 &element,
@@ -1545,7 +1774,7 @@ fn schedule_bounded_deadline(
     });
 }
 
-fn complete_bounded_playback(
+fn reconcile_bounded_boundary(
     runtime: &Rc<RefCell<PlayerRuntime>>,
     operation: BoundedOperation,
     element: &HtmlAudioElement,
@@ -1553,44 +1782,76 @@ fn complete_bounded_playback(
     status: Signal<PlaybackStatus>,
     snapshot: Signal<PlaybackSnapshot>,
 ) {
-    let end = {
+    let bounded = {
         let runtime = runtime.borrow();
         if !runtime.is_current_bounded(operation)
             || runtime.active_bounded_operation() != Some(operation)
         {
             return;
         }
-        runtime
+        *runtime
             .lifecycle
             .bounded()
             .expect("active bounded operation has a range")
-            .range
-            .end()
     };
 
     if element.pause().is_err() {
-        let mut runtime = runtime.borrow_mut();
-        if runtime.is_current_bounded(operation) {
-            runtime.deadline_generation.advance();
-            runtime
-                .lifecycle
-                .bounded_failed(BoundedPlaybackFailure::PauseRejected);
-            element.set_loop(runtime.lifecycle.repeat());
-            publish_lifecycle(&runtime.lifecycle, status, snapshot);
-        }
+        fail_bounded_pause(runtime, operation, element, status, snapshot);
         return;
     }
 
+    let wrap = {
+        let mut runtime = runtime.borrow_mut();
+        if !runtime.is_current_bounded(operation) {
+            return;
+        }
+        runtime.play_generation.advance();
+        runtime.deadline_generation.advance();
+        runtime.pending_bounded_seek = None;
+        runtime.lifecycle.paused();
+        match bounded.mode {
+            BoundedPlaybackMode::Once => {
+                runtime.lifecycle.bounded_completed();
+                element.set_loop(runtime.lifecycle.repeat());
+                position.set(Duration::from_secs_f64(bounded.range.end()));
+                None
+            }
+            BoundedPlaybackMode::Loop => {
+                let token = runtime
+                    .queue_bounded_seek(bounded.range.start(), true, BoundedSeekPurpose::Wrap)
+                    .expect("an active loop has a bounded operation");
+                Some((token, bounded.range.start()))
+            }
+        }
+    };
+    if let Some((token, target)) = wrap {
+        element.set_current_time(target);
+        publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
+        schedule_bounded_seek_timeout(Rc::downgrade(runtime), token, status, snapshot);
+    } else {
+        publish_lifecycle(&runtime.borrow().lifecycle, status, snapshot);
+    }
+}
+
+fn fail_bounded_pause(
+    runtime: &Rc<RefCell<PlayerRuntime>>,
+    operation: BoundedOperation,
+    element: &HtmlAudioElement,
+    status: Signal<PlaybackStatus>,
+    snapshot: Signal<PlaybackSnapshot>,
+) {
     let mut runtime = runtime.borrow_mut();
     if !runtime.is_current_bounded(operation) {
         return;
     }
-    runtime.play_generation.advance();
-    runtime.deadline_generation.advance();
     runtime.pending_bounded_seek = None;
-    runtime.lifecycle.bounded_completed();
+    runtime.play_generation.advance();
+    runtime.seek_generation.advance();
+    runtime.deadline_generation.advance();
+    runtime
+        .lifecycle
+        .bounded_failed(BoundedPlaybackFailure::PauseRejected);
     element.set_loop(runtime.lifecycle.repeat());
-    position.set(Duration::from_secs_f64(end));
     publish_lifecycle(&runtime.lifecycle, status, snapshot);
 }
 
@@ -1733,6 +1994,7 @@ struct WebPlayer {
     graph_source: Option<MediaElementAudioSourceNode>,
     _object_url: Option<ObjectUrl>,
     listeners: Vec<EventListener>,
+    visibility_listener: Option<(Document, EventListener)>,
 }
 
 #[derive(Clone)]
@@ -1897,7 +2159,7 @@ impl WebPlayer {
                     }
                 };
                 if let Some(operation) = operation_to_complete {
-                    complete_bounded_playback(
+                    reconcile_bounded_boundary(
                         &runtime,
                         operation,
                         &element_for_time,
@@ -1926,7 +2188,7 @@ impl WebPlayer {
                     let Some(pending) = runtime_ref.pending_bounded_seek else {
                         return;
                     };
-                    if !runtime_ref.is_current_bounded(pending.operation)
+                    if !runtime_ref.is_current_bounded_seek(pending.token)
                         || element_for_seeked.seeking()
                         || !actual.is_finite()
                         || (actual - pending.target).abs() > BOUNDED_SEEK_TOLERANCE_SECONDS
@@ -2124,7 +2386,7 @@ impl WebPlayer {
                     runtime_ref.active_bounded_operation()
                 };
                 if let Some(operation) = operation {
-                    complete_bounded_playback(
+                    reconcile_bounded_boundary(
                         &runtime,
                         operation,
                         &element_for_ended,
@@ -2139,6 +2401,77 @@ impl WebPlayer {
                 }
             });
         }) as Box<dyn FnMut()>);
+
+        let visibility_document = web_sys::window().and_then(|window| window.document());
+        let visibility_listener = visibility_document.map(|document| {
+            let document_for_visibility = document.clone();
+            let element_for_visibility = element.clone();
+            let runtime_for_visibility = runtime.clone();
+            let dioxus_runtime_for_visibility = dioxus_runtime.clone();
+            let on_visibility = Closure::wrap(Box::new(move || {
+                if document_for_visibility.hidden() {
+                    return;
+                }
+                dioxus_runtime_for_visibility.in_scope(dioxus_scope, || {
+                    let Some(runtime) = runtime_for_visibility.upgrade() else {
+                        return;
+                    };
+                    let value = element_for_visibility.current_time();
+                    let operation = {
+                        let runtime_ref = runtime.borrow();
+                        if !runtime_ref.is_current_attempt(source_attempt) {
+                            return;
+                        }
+                        runtime_ref.active_bounded_operation()
+                    };
+                    let Some(operation) = operation else {
+                        return;
+                    };
+                    if value.is_finite() && value >= 0.0 {
+                        position.set(Duration::from_secs_f64(value));
+                    }
+                    let end = runtime
+                        .borrow()
+                        .lifecycle
+                        .bounded()
+                        .expect("active bounded operation has a range")
+                        .range
+                        .end();
+                    if value.is_finite() && value >= end {
+                        reconcile_bounded_boundary(
+                            &runtime,
+                            operation,
+                            &element_for_visibility,
+                            position,
+                            status,
+                            snapshot,
+                        );
+                    } else if element_for_visibility.paused() {
+                        let mut runtime_ref = runtime.borrow_mut();
+                        if runtime_ref.active_bounded_operation() == Some(operation) {
+                            runtime_ref.play_generation.advance();
+                            runtime_ref.deadline_generation.advance();
+                            runtime_ref.lifecycle.paused();
+                            runtime_ref.lifecycle.bounded_paused();
+                            publish_lifecycle(&runtime_ref.lifecycle, status, snapshot);
+                        }
+                    } else {
+                        schedule_bounded_deadline(
+                            Rc::downgrade(&runtime),
+                            operation,
+                            element_for_visibility.clone(),
+                            position,
+                            status,
+                            snapshot,
+                        );
+                    }
+                });
+            }) as Box<dyn FnMut()>);
+            (
+                document,
+                EventListener::new("visibilitychange", on_visibility),
+            )
+        });
 
         let element_for_error = element.clone();
         let runtime_for_error = runtime;
@@ -2198,12 +2531,21 @@ impl WebPlayer {
                 return Err(error);
             }
         }
+        if let Some((document, listener)) = visibility_listener.as_ref()
+            && let Err(error) = add_document_listener(document, listener.name, &listener.callback)
+        {
+            for listener in &listeners {
+                remove_listener(&element, listener.name, &listener.callback);
+            }
+            return Err(error);
+        }
 
         let player = Self {
             element,
             graph_source,
             _object_url: object_url,
             listeners,
+            visibility_listener,
         };
         player.element.set_src(&source_url);
         player.element.load();
@@ -2274,6 +2616,9 @@ impl Drop for WebPlayer {
     fn drop(&mut self) {
         for listener in &self.listeners {
             remove_listener(&self.element, listener.name, &listener.callback);
+        }
+        if let Some((document, listener)) = self.visibility_listener.as_ref() {
+            remove_document_listener(document, listener.name, &listener.callback);
         }
         let _ = self.element.pause();
         if let Some(source) = self.graph_source.take() {
@@ -2364,6 +2709,20 @@ fn add_listener(
 
 fn remove_listener(element: &HtmlAudioElement, name: &str, callback: &Closure<dyn FnMut()>) {
     let _ = element.remove_event_listener_with_callback(name, callback.as_ref().unchecked_ref());
+}
+
+fn add_document_listener(
+    document: &Document,
+    name: &str,
+    callback: &Closure<dyn FnMut()>,
+) -> Result<(), AudioError> {
+    document
+        .add_event_listener_with_callback(name, callback.as_ref().unchecked_ref())
+        .map_err(playback_error)
+}
+
+fn remove_document_listener(document: &Document, name: &str, callback: &Closure<dyn FnMut()>) {
+    let _ = document.remove_event_listener_with_callback(name, callback.as_ref().unchecked_ref());
 }
 
 fn playback_error(value: JsValue) -> AudioError {

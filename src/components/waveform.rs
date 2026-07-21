@@ -268,7 +268,12 @@ pub fn InteractiveWaveform(
                             .with_start(value)
                             .clamped_to_duration(waveform_duration);
                         draft_selection.set(None);
-                        on_selection_change.call(next);
+                        commit_selection_change(
+                            controller,
+                            controlled_selection,
+                            next,
+                            on_selection_change,
+                        );
                     }
                 },
                 onkeydown: move |event| {
@@ -282,7 +287,12 @@ pub fn InteractiveWaveform(
                     ) {
                         event.prevent_default();
                         draft_selection.set(None);
-                        on_selection_change.call(controlled_selection.with_start(value));
+                        commit_selection_change(
+                            controller,
+                            controlled_selection,
+                            controlled_selection.with_start(value),
+                            on_selection_change,
+                        );
                     }
                 },
                 onpointercancel: move |_| draft_selection.set(None),
@@ -314,7 +324,12 @@ pub fn InteractiveWaveform(
                             .with_end(value)
                             .clamped_to_duration(waveform_duration);
                         draft_selection.set(None);
-                        on_selection_change.call(next);
+                        commit_selection_change(
+                            controller,
+                            controlled_selection,
+                            next,
+                            on_selection_change,
+                        );
                     }
                 },
                 onkeydown: move |event| {
@@ -328,13 +343,30 @@ pub fn InteractiveWaveform(
                     ) {
                         event.prevent_default();
                         draft_selection.set(None);
-                        on_selection_change.call(controlled_selection.with_end(value));
+                        commit_selection_change(
+                            controller,
+                            controlled_selection,
+                            controlled_selection.with_end(value),
+                            on_selection_change,
+                        );
                     }
                 },
                 onpointercancel: move |_| draft_selection.set(None),
             }
         }
     }
+}
+
+fn commit_selection_change(
+    controller: AudioPlayerController,
+    current: WaveformSelection,
+    next: WaveformSelection,
+    on_selection_change: EventHandler<WaveformSelection>,
+) {
+    if next != current {
+        controller.retarget_bounded_after_selection_commit(next);
+    }
+    on_selection_change.call(next);
 }
 
 fn positive_step(value: f64, fallback: f64) -> f64 {

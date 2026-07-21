@@ -6,10 +6,10 @@ use dioxus_icons::lucide::{Pause, Play, Repeat2, RotateCcw, RotateCw, Square, Vo
 use super::AudioScrubber;
 use crate::AudioErrorKind;
 use crate::playback::{
-    AudioPlayerController, PlaybackAudibilityCapability, PlaybackNetworkActivity,
-    PlaybackPlayFailure, PlaybackReadiness, PlaybackSource, PlaybackSourceFailure,
-    PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange, PlaybackTransport,
-    use_audio_player,
+    AudioPlayerController, BoundedPlaybackEvent, BoundedPlaybackMode, PlaybackAudibilityCapability,
+    PlaybackNetworkActivity, PlaybackPlayFailure, PlaybackReadiness, PlaybackSource,
+    PlaybackSourceFailure, PlaybackSourceLifecycle, PlaybackStatus, PlaybackTimeRange,
+    PlaybackTransport, use_audio_player,
 };
 
 /// Localizable messages emitted by [`PlaybackStatusAnnouncer`].
@@ -48,18 +48,57 @@ impl Default for PlaybackAnnouncementLabels {
     }
 }
 
+/// Localizable messages for discrete Bounded Playback lifecycle changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundedPlaybackAnnouncementLabels {
+    pub starting_once: String,
+    pub starting_loop: String,
+    pub completed: String,
+    pub cancelled: String,
+    pub wrapping: String,
+    pub failed: String,
+}
+
+impl Default for BoundedPlaybackAnnouncementLabels {
+    fn default() -> Self {
+        Self {
+            starting_once: "Bounded Playback starting".to_string(),
+            starting_loop: "Looped Bounded Playback starting".to_string(),
+            completed: "Bounded Playback complete".to_string(),
+            cancelled: "Bounded Playback cancelled".to_string(),
+            wrapping: "Bounded Playback wrapping".to_string(),
+            failed: "Bounded Playback failed".to_string(),
+        }
+    }
+}
+
 /// An optional polite live region for coarse Playback lifecycle changes.
 #[component]
 pub fn PlaybackStatusAnnouncer(
     controller: AudioPlayerController,
     #[props(default)] labels: PlaybackAnnouncementLabels,
+    #[props(default)] bounded_labels: BoundedPlaybackAnnouncementLabels,
 ) -> Element {
     let status = controller.status()();
     let snapshot = controller.snapshot()();
-    let message = if snapshot.source == PlaybackSourceLifecycle::Dormant {
-        labels.dormant.as_str()
-    } else if snapshot.source_failure.is_some() {
+    let bounded_message = snapshot.bounded_event.map(|event| match event {
+        BoundedPlaybackEvent::Started(mode) => match mode {
+            BoundedPlaybackMode::Once => bounded_labels.starting_once.as_str(),
+            BoundedPlaybackMode::Loop => bounded_labels.starting_loop.as_str(),
+        },
+        BoundedPlaybackEvent::Wrapping => bounded_labels.wrapping.as_str(),
+        BoundedPlaybackEvent::Completed => bounded_labels.completed.as_str(),
+        BoundedPlaybackEvent::Cancelled => bounded_labels.cancelled.as_str(),
+        BoundedPlaybackEvent::Failed => bounded_labels.failed.as_str(),
+    });
+    let message = if snapshot.source_failure.is_some() {
         labels.failed.as_str()
+    } else if let Some(message) = bounded_message {
+        message
+    } else if snapshot.bounded.is_some() {
+        ""
+    } else if snapshot.source == PlaybackSourceLifecycle::Dormant {
+        labels.dormant.as_str()
     } else if matches!(
         snapshot.play_failure,
         Some(PlaybackPlayFailure::InteractionRequired(_))

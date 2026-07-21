@@ -289,7 +289,7 @@ fn recorder_commands_can_be_composed_as_independent_native_controls() {
             }
             RecorderCancelButton {
                 recorder,
-                request_label: "Abort microphone access".to_string(),
+                preparing_label: "Abort capture preparation".to_string(),
                 recording_label: "Discard capture".to_string(),
             }
             RecorderPauseResumeButton {

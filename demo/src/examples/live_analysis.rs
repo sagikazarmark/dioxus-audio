@@ -33,7 +33,7 @@ pub fn LiveAnalysisExample() -> Element {
                 }
                 RecorderCancelButton {
                     recorder: primary_recorder,
-                    request_label: "Cancel primary Recording".to_string(),
+                    preparing_label: "Cancel primary Recording".to_string(),
                     recording_label: "Cancel primary Recording".to_string(),
                 }
                 RecorderStartButton {
@@ -42,7 +42,7 @@ pub fn LiveAnalysisExample() -> Element {
                 }
                 RecorderCancelButton {
                     recorder: replacement_recorder,
-                    request_label: "Cancel replacement Recording".to_string(),
+                    preparing_label: "Cancel replacement Recording".to_string(),
                     recording_label: "Cancel replacement Recording".to_string(),
                 }
                 button {

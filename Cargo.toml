@@ -51,6 +51,7 @@ web-sys = { version = "0.3", features = [
     "MediaStreamAudioSourceNode",
     "MediaStreamConstraints",
     "MediaStreamTrack",
+    "MediaStreamTrackState",
     "MediaTrackConstraints",
     "MediaTrackSettings",
     "MediaTrackSupportedConstraints",

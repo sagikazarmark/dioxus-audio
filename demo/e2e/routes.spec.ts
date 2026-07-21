@@ -100,7 +100,7 @@ for (const route of documentedRoutes) {
     await expect(page.getByText(route.example, { exact: true })).toBeVisible();
 
     if (route.tabbed) {
-      await page.getByRole("button", { name: "Source" }).click();
+      await page.getByRole("button", { name: "Source", exact: true }).click();
       await expect(
         page.getByRole("region", { name: "Example source" }),
       ).toBeVisible();

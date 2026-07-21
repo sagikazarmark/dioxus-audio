@@ -114,9 +114,7 @@ fn microphone_message(status: &MicrophoneStatus) -> (&'static str, String) {
             ("ready", "Microphone ready".to_string())
         }
         RecorderStatus::Idle => ("idle", "Microphone not requested".to_string()),
-        RecorderStatus::RequestingPermission => {
-            ("pending", "Requesting microphone access".to_string())
-        }
+        RecorderStatus::Preparing => ("pending", "Preparing recording".to_string()),
         RecorderStatus::Recording => ("recording", "Recording".to_string()),
         RecorderStatus::Paused => ("paused", "Recording paused".to_string()),
         RecorderStatus::Stopping => ("pending", "Finishing recording".to_string()),

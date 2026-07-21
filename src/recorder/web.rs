@@ -10,13 +10,23 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::{
     AudioContext, Blob, BlobEvent, BlobPropertyBag, MediaRecorder, MediaRecorderOptions,
-    MediaStream, MediaStreamAudioSourceNode, MediaStreamTrack,
+    MediaStream, MediaStreamAudioSourceNode, MediaStreamTrack, MediaStreamTrackState,
 };
 
 use super::*;
 use crate::analysis::{AudioAnalyser, AudioAnalyserControl, peak_amplitude};
 use crate::devices::web::{audio_error_from_js, media_devices, stop_stream};
 use crate::{AudioData, AudioErrorKind, RecordingChunk};
+
+enum RecordingSourceRequest {
+    Acquire(Option<AudioInputId>),
+    Supplied(RecordingSource),
+}
+
+enum RecordingInput {
+    Acquire(Option<AudioInputId>),
+    Supplied(PreparedSource),
+}
 
 pub(super) fn use_web_audio_recorder(
     options: RecorderOptions,
@@ -52,7 +62,11 @@ pub(super) fn use_web_audio_recorder(
     }
 
     let runtime_for_start = runtime.clone();
-    let start: Callback<(), Result<(), RecorderCommandError>> = use_callback(move |()| {
+    let begin_start = Rc::new(RefCell::new(move |source: RecordingSourceRequest| {
+        let input_device = match &source {
+            RecordingSourceRequest::Acquire(input_device) => input_device.clone(),
+            RecordingSourceRequest::Supplied(_) => None,
+        };
         if let Err(error) = options.validate() {
             let accepted = runtime_for_start
                 .borrow_mut()
@@ -63,18 +77,31 @@ pub(super) fn use_web_audio_recorder(
                 microphone.set(MicrophoneStatus {
                     permission: MicrophonePermission::Unknown,
                     recorder: RecorderStatus::Failed(error),
-                    input_device: selected_input(),
+                    input_device,
                     muted: false,
                 });
             }
             return Err(command_error("invalid recorder options"));
         }
 
+        let (input, requested, initial_permission, acquires_device) = match source {
+            RecordingSourceRequest::Acquire(input_device) => (
+                RecordingInput::Acquire(input_device),
+                Some(options.constraints.clone()),
+                MicrophonePermission::Prompt,
+                true,
+            ),
+            RecordingSourceRequest::Supplied(source) => (
+                RecordingInput::Supplied(prepare_supplied_source(&source)?),
+                None,
+                MicrophonePermission::Unknown,
+                false,
+            ),
+        };
         let recording_id = runtime_for_start.borrow_mut().lifecycle.start()?;
-        let input_device = selected_input();
         outcome.set(None);
         chunk_delivery_failure.set(None);
-        requested_constraints.set(Some(options.constraints.clone()));
+        requested_constraints.set(requested);
         settings.set(None);
         media_type.set(None);
         {
@@ -86,15 +113,12 @@ pub(super) fn use_web_audio_recorder(
             runtime.selected_device = input_device.clone();
             runtime.muted = false;
             runtime.terminal_error = None;
+            runtime.acquires_device = acquires_device;
+            runtime.microphone_permission = initial_permission;
         }
         analyser.set(None);
         elapsed.set(Duration::ZERO);
-        publish_status(
-            &runtime_for_start,
-            &mut status,
-            &mut microphone,
-            MicrophonePermission::Prompt,
-        );
+        publish_status(&runtime_for_start, &mut status, &mut microphone);
 
         let runtime = runtime_for_start.clone();
         let options = options.clone();
@@ -102,7 +126,7 @@ pub(super) fn use_web_audio_recorder(
         wasm_bindgen_futures::spawn_local(async move {
             let result = start_recording(
                 recording_id,
-                input_device,
+                input,
                 options.clone(),
                 &runtime,
                 status,
@@ -152,7 +176,16 @@ pub(super) fn use_web_audio_recorder(
             });
         });
         Ok(())
+    }));
+    let begin_device_start = begin_start.clone();
+    let start: Callback<(), Result<(), RecorderCommandError>> = use_callback(move |()| {
+        (begin_device_start.borrow_mut())(RecordingSourceRequest::Acquire(selected_input()))
     });
+    let begin_supplied_start = begin_start.clone();
+    let start_with_source: Callback<RecordingSource, Result<(), RecorderCommandError>> =
+        use_callback(move |source| {
+            (begin_supplied_start.borrow_mut())(RecordingSourceRequest::Supplied(source))
+        });
 
     let runtime_for_pause = runtime.clone();
     let pause: Callback<(), Result<(), RecorderCommandError>> = use_callback(move |()| {
@@ -170,12 +203,7 @@ pub(super) fn use_web_audio_recorder(
         runtime.accumulate_elapsed();
         elapsed.set(duration_from_ms(runtime.elapsed_ms));
         drop(runtime);
-        publish_status(
-            &runtime_for_pause,
-            &mut status,
-            &mut microphone,
-            MicrophonePermission::Granted,
-        );
+        publish_status(&runtime_for_pause, &mut status, &mut microphone);
         Ok(())
     });
 
@@ -194,12 +222,7 @@ pub(super) fn use_web_audio_recorder(
         runtime.lifecycle.resume()?;
         runtime.segment_started_at = Some(now_ms());
         drop(runtime);
-        publish_status(
-            &runtime_for_resume,
-            &mut status,
-            &mut microphone,
-            MicrophonePermission::Granted,
-        );
+        publish_status(&runtime_for_resume, &mut status, &mut microphone);
         Ok(())
     });
 
@@ -278,6 +301,7 @@ pub(super) fn use_web_audio_recorder(
         outcome: outcome.into(),
         chunk_delivery_failure: chunk_delivery_failure.into(),
         start,
+        start_with_source,
         pause,
         resume,
         request_chunk_boundary,
@@ -298,6 +322,8 @@ struct Runtime {
     selected_device: Option<AudioInputId>,
     muted: bool,
     terminal_error: Option<AudioError>,
+    acquires_device: bool,
+    microphone_permission: MicrophonePermission,
     mounted: bool,
 }
 
@@ -313,6 +339,8 @@ impl Default for Runtime {
             selected_device: None,
             muted: false,
             terminal_error: None,
+            acquires_device: false,
+            microphone_permission: MicrophonePermission::Unknown,
             mounted: true,
         }
     }
@@ -529,22 +557,59 @@ impl Drop for UnmountGuard {
     }
 }
 
+struct PreparedSource {
+    stream: MediaStream,
+    track: MediaStreamTrack,
+    track_cleanup: TrackCleanup,
+    settings: Option<RecordingSourceSettings>,
+}
+
+#[derive(Clone, Copy)]
+enum TrackCleanup {
+    Preserve,
+    Stop,
+}
+
+impl TrackCleanup {
+    fn apply(self, track: &MediaStreamTrack) {
+        if matches!(self, Self::Stop) {
+            track.stop();
+        }
+    }
+}
+
 struct PendingCapture {
     stream: Option<MediaStream>,
+    track: Option<MediaStreamTrack>,
+    track_cleanup: TrackCleanup,
+    settings: Option<RecordingSourceSettings>,
     context: Option<AudioContext>,
 }
 
 impl PendingCapture {
-    fn new(stream: MediaStream) -> Self {
+    fn new(source: PreparedSource) -> Self {
         Self {
-            stream: Some(stream),
+            stream: Some(source.stream),
+            track: Some(source.track),
+            track_cleanup: source.track_cleanup,
+            settings: source.settings,
             context: None,
         }
     }
 
-    fn into_parts(mut self) -> (MediaStream, AudioContext) {
+    fn track(&self) -> &MediaStreamTrack {
+        self.track.as_ref().expect("pending capture owns its track")
+    }
+
+    fn settings(&self) -> Option<RecordingSourceSettings> {
+        self.settings.clone()
+    }
+
+    fn into_parts(mut self) -> (MediaStream, MediaStreamTrack, TrackCleanup, AudioContext) {
         (
             self.stream.take().expect("pending capture owns its stream"),
+            self.track.take().expect("pending capture owns its track"),
+            self.track_cleanup,
             self.context
                 .take()
                 .expect("pending capture owns its context"),
@@ -554,8 +619,8 @@ impl PendingCapture {
 
 impl Drop for PendingCapture {
     fn drop(&mut self) {
-        if let Some(stream) = self.stream.take() {
-            stop_stream(&stream);
+        if let Some(track) = self.track.take() {
+            self.track_cleanup.apply(&track);
         }
         if let Some(context) = self.context.take() {
             settle_audio_promise(context.close());
@@ -565,7 +630,8 @@ impl Drop for PendingCapture {
 
 struct WebRecording {
     recorder: MediaRecorder,
-    stream: MediaStream,
+    start_resolver: Rc<RefCell<Option<js_sys::Function>>>,
+    _stream: MediaStream,
     context: AudioContext,
     _source: MediaStreamAudioSourceNode,
     analyser: AudioAnalyserControl,
@@ -575,6 +641,7 @@ struct WebRecording {
     _on_stop: Closure<dyn FnMut()>,
     _on_error: Closure<dyn FnMut()>,
     track: MediaStreamTrack,
+    track_cleanup: TrackCleanup,
     on_mute: Closure<dyn FnMut()>,
     on_unmute: Closure<dyn FnMut()>,
     on_ended: Closure<dyn FnMut()>,
@@ -582,13 +649,16 @@ struct WebRecording {
 
 impl Drop for WebRecording {
     fn drop(&mut self) {
+        settle_start(&self.start_resolver);
         if let Some(delivery) = &self.chunk_delivery {
             delivery.invalidate();
         }
         self.analyser.set_available(false);
+        self.recorder.set_onstart(None);
         self.recorder.set_ondataavailable(None);
         self.recorder.set_onstop(None);
         self.recorder.set_onerror(None);
+        let _ = self.recorder.stop();
         let _ = self
             .track
             .remove_event_listener_with_callback("mute", self.on_mute.as_ref().unchecked_ref());
@@ -598,7 +668,7 @@ impl Drop for WebRecording {
         let _ = self
             .track
             .remove_event_listener_with_callback("ended", self.on_ended.as_ref().unchecked_ref());
-        stop_stream(&self.stream);
+        self.track_cleanup.apply(&self.track);
         settle_audio_promise(self.context.close());
     }
 }
@@ -606,7 +676,7 @@ impl Drop for WebRecording {
 #[allow(clippy::too_many_arguments)]
 async fn start_recording(
     recording_id: RecordingId,
-    input_device: Option<AudioInputId>,
+    input: RecordingInput,
     options: RecorderOptions,
     runtime: &Rc<RefCell<Runtime>>,
     mut status: Signal<RecorderStatus>,
@@ -621,8 +691,13 @@ async fn start_recording(
     dioxus_runtime: Rc<DioxusRuntime>,
     dioxus_scope: ScopeId,
 ) -> Result<(), AudioError> {
-    let stream = acquire_stream(input_device.as_ref(), &options.constraints).await?;
-    let mut pending = PendingCapture::new(stream);
+    let source = match input {
+        RecordingInput::Acquire(input_device) => {
+            prepare_acquired_source(input_device.as_ref(), &options.constraints).await?
+        }
+        RecordingInput::Supplied(source) => source,
+    };
+    let mut pending = PendingCapture::new(source);
     if !runtime.borrow().mounted
         || runtime.borrow().lifecycle.active_recording != Some(recording_id)
     {
@@ -668,20 +743,8 @@ async fn start_recording(
         &recorder_options,
     )
     .map_err(audio_error_from_js)?;
-    let track = pending
-        .stream
-        .as_ref()
-        .expect("pending capture owns its stream")
-        .get_audio_tracks()
-        .get(0)
-        .dyn_into::<MediaStreamTrack>()
-        .map_err(|_| {
-            AudioError::new(
-                AudioErrorKind::DeviceNotFound,
-                "microphone stream has no audio track",
-            )
-        })?;
-    let settings = read_settings(&track);
+    let track = pending.track().clone();
+    let settings = pending.settings();
     let chunks = Rc::new(RefCell::new(Vec::<Blob>::new()));
     let chunk_delivery = options.chunk_delivery.clone().map(|delivery| {
         ChunkDelivery::new(
@@ -782,12 +845,7 @@ async fn start_recording(
                 return;
             };
             analyser_signal.set(None);
-            publish_status(
-                &runtime,
-                &mut status,
-                &mut microphone,
-                MicrophonePermission::Granted,
-            );
+            publish_status(&runtime, &mut status, &mut microphone);
 
             spawn(async move {
                 gloo_timers::future::TimeoutFuture::new(0).await;
@@ -810,37 +868,34 @@ async fn start_recording(
                         &mut status,
                         &mut microphone,
                         &mut outcome_signal,
-                        MicrophonePermission::Granted,
                     );
                     return;
                 }
 
                 if disposition == CompletionDisposition::Discard {
-                    let mut runtime = runtime.borrow_mut();
-                    if !runtime.lifecycle.complete_finalize(recording_id) || !runtime.mounted {
+                    let mut runtime_mut = runtime.borrow_mut();
+                    if !runtime_mut.lifecycle.complete_finalize(recording_id)
+                        || !runtime_mut.mounted
+                    {
                         return;
                     }
-                    runtime.muted = false;
-                    drop(runtime);
+                    runtime_mut.muted = false;
+                    drop(runtime_mut);
                     outcome_signal.set(Some(RecordingOutcome::Discarded(recording_id)));
-                    status.set(RecorderStatus::Idle);
-                    microphone.set(MicrophoneStatus {
-                        permission: MicrophonePermission::Granted,
-                        recorder: RecorderStatus::Idle,
-                        input_device: selected_device,
-                        muted: false,
-                    });
+                    publish_status(&runtime, &mut status, &mut microphone);
                     return;
                 }
 
                 match collect_audio(chunks, mime_type).await {
                     Ok(audio) => {
-                        let mut runtime = runtime.borrow_mut();
-                        if !runtime.lifecycle.complete_finalize(recording_id) || !runtime.mounted {
+                        let mut runtime_mut = runtime.borrow_mut();
+                        if !runtime_mut.lifecycle.complete_finalize(recording_id)
+                            || !runtime_mut.mounted
+                        {
                             return;
                         }
-                        runtime.muted = false;
-                        drop(runtime);
+                        runtime_mut.muted = false;
+                        drop(runtime_mut);
                         completed.set(Some(RecordedAudio {
                             recording_id,
                             audio,
@@ -849,13 +904,7 @@ async fn start_recording(
                             input_device: selected_device.clone(),
                         }));
                         outcome_signal.set(Some(RecordingOutcome::Completed(recording_id)));
-                        status.set(RecorderStatus::Idle);
-                        microphone.set(MicrophoneStatus {
-                            permission: MicrophonePermission::Granted,
-                            recorder: RecorderStatus::Idle,
-                            input_device: selected_device,
-                            muted: false,
-                        });
+                        publish_status(&runtime, &mut status, &mut microphone);
                     }
                     Err(error) => {
                         publish_recording_failure(
@@ -865,7 +914,6 @@ async fn start_recording(
                             &mut status,
                             &mut microphone,
                             &mut outcome_signal,
-                            MicrophonePermission::Granted,
                         );
                     }
                 }
@@ -915,12 +963,7 @@ async fn start_recording(
             };
             if should_finalize {
                 analyser_signal.set(None);
-                publish_status(
-                    &runtime,
-                    &mut status,
-                    &mut microphone,
-                    MicrophonePermission::Granted,
-                );
+                publish_status(&runtime, &mut status, &mut microphone);
             }
         });
     }) as Box<dyn FnMut()>);
@@ -931,13 +974,11 @@ async fn start_recording(
     let on_mute = Closure::wrap(Box::new(move || {
         dioxus_runtime_for_mute.in_scope(dioxus_scope, || {
             if let Some(runtime) = runtime_for_mute.upgrade() {
-                runtime.borrow_mut().muted = true;
-                publish_status(
-                    &runtime,
-                    &mut status,
-                    &mut microphone,
-                    MicrophonePermission::Granted,
-                );
+                let acquired = runtime.borrow().acquires_device;
+                if acquired {
+                    runtime.borrow_mut().muted = true;
+                    publish_status(&runtime, &mut status, &mut microphone);
+                }
             }
         });
     }) as Box<dyn FnMut()>);
@@ -948,13 +989,11 @@ async fn start_recording(
     let on_unmute = Closure::wrap(Box::new(move || {
         dioxus_runtime_for_unmute.in_scope(dioxus_scope, || {
             if let Some(runtime) = runtime_for_unmute.upgrade() {
-                runtime.borrow_mut().muted = false;
-                publish_status(
-                    &runtime,
-                    &mut status,
-                    &mut microphone,
-                    MicrophonePermission::Granted,
-                );
+                let acquired = runtime.borrow().acquires_device;
+                if acquired {
+                    runtime.borrow_mut().muted = false;
+                    publish_status(&runtime, &mut status, &mut microphone);
+                }
             }
         });
     }) as Box<dyn FnMut()>);
@@ -968,7 +1007,9 @@ async fn start_recording(
             if let Some(runtime) = runtime_for_ended.upgrade() {
                 let should_stop = {
                     let mut runtime = runtime.borrow_mut();
-                    runtime.muted = true;
+                    if runtime.acquires_device {
+                        runtime.muted = true;
+                    }
                     if matches!(
                         runtime.lifecycle.status(),
                         RecorderStatus::Recording | RecorderStatus::Paused
@@ -979,12 +1020,7 @@ async fn start_recording(
                         false
                     }
                 };
-                publish_status(
-                    &runtime,
-                    &mut status,
-                    &mut microphone,
-                    MicrophonePermission::Granted,
-                );
+                publish_status(&runtime, &mut status, &mut microphone);
                 if should_stop {
                     let _ = recorder_for_ended.stop();
                 }
@@ -994,14 +1030,47 @@ async fn start_recording(
     let _ = track.add_event_listener_with_callback("ended", on_ended.as_ref().unchecked_ref());
 
     let initially_muted = track.muted();
+    let (stream, track, track_cleanup, context) = pending.into_parts();
+    let (analyser_control, analyser) =
+        AudioAnalyserControl::new(analyser_node, context.sample_rate());
+    analyser_control.set_available(true);
+    let recording = WebRecording {
+        recorder: recorder.clone(),
+        start_resolver: start_resolver.clone(),
+        _stream: stream,
+        context,
+        _source: source,
+        analyser: analyser_control,
+        chunks,
+        chunk_delivery,
+        _on_data: on_data,
+        _on_stop: on_stop,
+        _on_error: on_error,
+        track,
+        track_cleanup,
+        on_mute,
+        on_unmute,
+        on_ended,
+    };
     let start_result = if let Some(delivery) = options.chunk_delivery.as_ref() {
-        recorder.start_with_time_slice(delivery.time_slice_millis())
+        recording
+            .recorder
+            .start_with_time_slice(delivery.time_slice_millis())
     } else {
-        recorder.start()
+        recording.recorder.start()
     };
     if let Err(error) = start_result {
-        recorder.set_onstart(None);
+        drop(recording);
         return Err(audio_error_from_js(error));
+    }
+    {
+        let mut runtime_mut = runtime.borrow_mut();
+        if runtime_mut.lifecycle.active_recording != Some(recording_id) || !runtime_mut.mounted {
+            drop(runtime_mut);
+            drop(recording);
+            return Ok(());
+        }
+        runtime_mut.recording = Some(recording);
     }
     let _ = wasm_bindgen_futures::JsFuture::from(start_promise).await;
     recorder.set_onstart(None);
@@ -1013,52 +1082,116 @@ async fn start_recording(
         ));
     }
     let media_type = recorder.mime_type();
-    let (stream, context) = pending.into_parts();
-    let (analyser_control, analyser) =
-        AudioAnalyserControl::new(analyser_node, context.sample_rate());
-    analyser_control.set_available(true);
-    let recording = WebRecording {
-        recorder,
-        stream,
-        context,
-        _source: source,
-        analyser: analyser_control,
-        chunks,
-        chunk_delivery,
-        _on_data: on_data,
-        _on_stop: on_stop,
-        _on_error: on_error,
-        track,
-        on_mute,
-        on_unmute,
-        on_ended,
-    };
 
     let mut runtime_mut = runtime.borrow_mut();
     if !runtime_mut.lifecycle.started(recording_id) || !runtime_mut.mounted {
+        let recording = runtime_mut.recording.take();
         drop(runtime_mut);
         drop(recording);
         return Ok(());
     }
     runtime_mut.segment_started_at = Some(now_ms());
     runtime_mut.last_peak_at = now_ms();
-    runtime_mut.muted = initially_muted;
-    runtime_mut.recording = Some(recording);
+    runtime_mut.muted = runtime_mut.acquires_device && initially_muted;
+    if runtime_mut.acquires_device {
+        runtime_mut.microphone_permission = MicrophonePermission::Granted;
+    }
     drop(runtime_mut);
 
     dioxus_runtime.in_scope(dioxus_scope, || {
         analyser_signal.set(Some(analyser));
         elapsed.set(Duration::ZERO);
-        settings_signal.set(Some(settings));
+        settings_signal.set(settings);
         media_type_signal.set(Some(media_type));
-        publish_status(
-            runtime,
-            &mut status,
-            &mut microphone,
-            MicrophonePermission::Granted,
-        );
+        publish_status(runtime, &mut status, &mut microphone);
     });
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum SourceTrackError {
+    AudioTrackCount,
+    Ended,
+    InvalidTrack,
+}
+
+impl SourceTrackError {
+    fn command_message(self) -> &'static str {
+        match self {
+            Self::AudioTrackCount => "Recording Source must contain exactly one audio track",
+            Self::Ended => "Recording Source audio track must be live",
+            Self::InvalidTrack => "Recording Source contains an invalid audio track",
+        }
+    }
+}
+
+fn prepare_supplied_source(
+    source: &RecordingSource,
+) -> Result<PreparedSource, RecorderCommandError> {
+    let track = single_live_audio_track(&source.stream)
+        .map_err(|error| command_error(error.command_message()))?;
+    let stream = audio_only_stream(&track)
+        .map_err(|_| command_error("browser rejected the Recording Source"))?;
+    Ok(PreparedSource {
+        stream,
+        track,
+        track_cleanup: TrackCleanup::Preserve,
+        settings: None,
+    })
+}
+
+async fn prepare_acquired_source(
+    input_device: Option<&AudioInputId>,
+    requested: &RecordingConstraints,
+) -> Result<PreparedSource, AudioError> {
+    let acquired = acquire_stream(input_device, requested).await?;
+    let track = match single_live_audio_track(&acquired) {
+        Ok(track) => track,
+        Err(error) => {
+            stop_stream(&acquired);
+            let kind = match error {
+                SourceTrackError::AudioTrackCount => AudioErrorKind::DeviceNotFound,
+                SourceTrackError::Ended => AudioErrorKind::DeviceUnavailable,
+                SourceTrackError::InvalidTrack => AudioErrorKind::Backend,
+            };
+            return Err(AudioError::new(kind, error.command_message()));
+        }
+    };
+    let stream = match audio_only_stream(&track) {
+        Ok(stream) => stream,
+        Err(error) => {
+            stop_stream(&acquired);
+            return Err(audio_error_from_js(error));
+        }
+    };
+    let settings = Some(read_settings(&track));
+    Ok(PreparedSource {
+        stream,
+        track,
+        track_cleanup: TrackCleanup::Stop,
+        settings,
+    })
+}
+
+fn single_live_audio_track(stream: &MediaStream) -> Result<MediaStreamTrack, SourceTrackError> {
+    let tracks = stream.get_audio_tracks();
+    if tracks.length() != 1 {
+        return Err(SourceTrackError::AudioTrackCount);
+    }
+    let track = tracks
+        .get(0)
+        .dyn_into::<MediaStreamTrack>()
+        .map_err(|_| SourceTrackError::InvalidTrack)?;
+    if track.ready_state() != MediaStreamTrackState::Live {
+        return Err(SourceTrackError::Ended);
+    }
+    Ok(track)
+}
+
+fn audio_only_stream(track: &MediaStreamTrack) -> Result<MediaStream, JsValue> {
+    let tracks = Array::new();
+    tracks.push(track.as_ref());
+    MediaStream::new_with_tracks(tracks.as_ref())
 }
 
 async fn acquire_stream(
@@ -1265,16 +1398,20 @@ fn stop_or_cancel(
     }
 
     if matches!(runtime_mut.lifecycle.status(), RecorderStatus::Idle) {
+        let recording = runtime_mut.recording.take();
         if let Some(recording_id) = cancelled_recording {
             outcome.set(Some(RecordingOutcome::Discarded(recording_id)));
         }
         status.set(RecorderStatus::Idle);
+        runtime_mut.microphone_permission = MicrophonePermission::Unknown;
         microphone.set(MicrophoneStatus {
-            permission: MicrophonePermission::Unknown,
+            permission: runtime_mut.microphone_permission,
             recorder: RecorderStatus::Idle,
             input_device: runtime_mut.selected_device.clone(),
             muted: false,
         });
+        drop(runtime_mut);
+        drop(recording);
         return Ok(());
     }
 
@@ -1286,7 +1423,7 @@ fn stop_or_cancel(
         .map(|recording| recording.recorder.clone())
         .ok_or_else(|| command_error("no active recorder"))?;
     drop(runtime_mut);
-    publish_status(runtime, status, microphone, MicrophonePermission::Granted);
+    publish_status(runtime, status, microphone);
     if recorder.stop().is_err() {
         let error = AudioError::new(
             AudioErrorKind::RecorderFailure,
@@ -1301,7 +1438,6 @@ fn stop_or_cancel(
                 status,
                 microphone,
                 outcome,
-                MicrophonePermission::Granted,
             );
         }
         analyser.set(None);
@@ -1319,20 +1455,19 @@ fn fail_start(
     microphone: &mut Signal<MicrophoneStatus>,
     outcome: &mut Signal<Option<RecordingOutcome>>,
 ) {
-    let permission = if error.kind() == AudioErrorKind::PermissionDenied {
-        MicrophonePermission::Denied
-    } else {
-        MicrophonePermission::Unknown
-    };
-    if publish_recording_failure(
-        recording_id,
-        error,
-        runtime,
-        status,
-        microphone,
-        outcome,
-        permission,
-    ) {
+    {
+        let mut runtime = runtime.borrow_mut();
+        if !runtime.mounted || runtime.lifecycle.active_recording != Some(recording_id) {
+            return;
+        }
+        runtime.microphone_permission =
+            if runtime.acquires_device && error.kind() == AudioErrorKind::PermissionDenied {
+                MicrophonePermission::Denied
+            } else {
+                MicrophonePermission::Unknown
+            };
+    }
+    if publish_recording_failure(recording_id, error, runtime, status, microphone, outcome) {
         analyser.set(None);
     }
 }
@@ -1345,16 +1480,18 @@ fn publish_recording_failure(
     status: &mut Signal<RecorderStatus>,
     microphone: &mut Signal<MicrophoneStatus>,
     outcome: &mut Signal<Option<RecordingOutcome>>,
-    permission: MicrophonePermission,
 ) -> bool {
-    let input_device = {
+    let (input_device, permission) = {
         let mut runtime = runtime.borrow_mut();
         if !runtime.mounted || !runtime.lifecycle.failed(recording_id, error.clone()) {
             return false;
         }
         runtime.muted = false;
         runtime.recording.take();
-        runtime.selected_device.clone()
+        (
+            runtime.selected_device.clone(),
+            runtime.microphone_permission,
+        )
     };
     outcome.set(Some(RecordingOutcome::Failed {
         recording_id,
@@ -1374,13 +1511,12 @@ fn publish_status(
     runtime: &Rc<RefCell<Runtime>>,
     status: &mut Signal<RecorderStatus>,
     microphone: &mut Signal<MicrophoneStatus>,
-    permission: MicrophonePermission,
 ) {
     let runtime = runtime.borrow();
     let recorder = runtime.lifecycle.status().clone();
     status.set(recorder.clone());
     microphone.set(MicrophoneStatus {
-        permission,
+        permission: runtime.microphone_permission,
         recorder,
         input_device: runtime.selected_device.clone(),
         muted: runtime.muted,

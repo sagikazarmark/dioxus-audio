@@ -10,7 +10,7 @@ fn stopped_recording_completes_once_and_returns_to_idle() {
     let mut recorder = RecorderLifecycle::default();
 
     let recording_id = recorder.start().unwrap();
-    assert_eq!(recorder.status(), &RecorderStatus::RequestingPermission);
+    assert_eq!(recorder.status(), &RecorderStatus::Preparing);
     assert!(recorder.started(recording_id));
     assert_eq!(recorder.status(), &RecorderStatus::Recording);
 
@@ -83,7 +83,7 @@ fn stale_backend_events_cannot_replace_a_new_recording() {
     let current = recorder.start().unwrap();
 
     assert!(!recorder.started(stale));
-    assert_eq!(recorder.status(), &RecorderStatus::RequestingPermission);
+    assert_eq!(recorder.status(), &RecorderStatus::Preparing);
     assert!(recorder.started(current));
 }
 

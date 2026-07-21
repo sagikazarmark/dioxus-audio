@@ -1,4 +1,4 @@
-//! Microphone recording state and hooks.
+//! Audio recording state and hooks.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -15,11 +15,43 @@ use crate::{AudioInputId, RecordedAudio, RecordingChunk, RecordingId};
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
 
+/// An opaque, application-supplied live audio source.
+///
+/// Recorder snapshots exactly one live audio track when
+/// [`AudioRecorder::start_with_source`] accepts a Recording. The track is
+/// preserved through completion, discard, failure, and Recorder cleanup.
+#[derive(Clone)]
+pub struct RecordingSource {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    stream: web_sys::MediaStream,
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    _unsupported: (),
+}
+
+impl fmt::Debug for RecordingSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RecordingSource")
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+impl RecordingSource {
+    /// Wrap a browser media stream as a preserved Recording Source.
+    ///
+    /// The raw stream remains application-owned and is not exposed again by
+    /// Recorder. Source validation occurs when a Recording is started.
+    pub fn from_media_stream(stream: web_sys::MediaStream) -> Self {
+        Self { stream }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RecorderStatus {
     Idle,
-    RequestingPermission,
+    Preparing,
     Recording,
     Paused,
     Stopping,
@@ -146,13 +178,13 @@ impl RecorderLifecycle {
         self.next_chunk_sequence = 0;
         self.completion = CompletionDisposition::Save;
         self.finalizing = false;
-        self.status = RecorderStatus::RequestingPermission;
+        self.status = RecorderStatus::Preparing;
         Ok(recording_id)
     }
 
     pub fn started(&mut self, recording_id: RecordingId) -> bool {
         if self.active_recording == Some(recording_id)
-            && matches!(self.status, RecorderStatus::RequestingPermission)
+            && matches!(self.status, RecorderStatus::Preparing)
         {
             self.status = RecorderStatus::Recording;
             true
@@ -224,7 +256,7 @@ impl RecorderLifecycle {
 
     pub fn cancel(&mut self) -> Result<(), RecorderCommandError> {
         match self.status {
-            RecorderStatus::RequestingPermission => {
+            RecorderStatus::Preparing => {
                 self.active_recording = None;
                 self.status = RecorderStatus::Idle;
             }
@@ -487,6 +519,7 @@ pub struct AudioRecorder {
     outcome: ReadSignal<Option<RecordingOutcome>>,
     chunk_delivery_failure: ReadSignal<Option<RecordingChunkDeliveryFailure>>,
     start: Callback<(), Result<(), RecorderCommandError>>,
+    start_with_source: Callback<RecordingSource, Result<(), RecorderCommandError>>,
     pause: Callback<(), Result<(), RecorderCommandError>>,
     resume: Callback<(), Result<(), RecorderCommandError>>,
     request_chunk_boundary: Callback<(), Result<(), RecorderCommandError>>,
@@ -551,6 +584,14 @@ impl AudioRecorder {
 
     pub fn start(self) -> Result<(), RecorderCommandError> {
         self.start.call(())
+    }
+
+    /// Start a Recording from one application-supplied live audio track.
+    ///
+    /// Video tracks are ignored. The supplied audio track is never stopped by
+    /// Recorder under this default preserve-tracks agreement.
+    pub fn start_with_source(self, source: RecordingSource) -> Result<(), RecorderCommandError> {
+        self.start_with_source.call(source)
     }
 
     pub fn pause(self) -> Result<(), RecorderCommandError> {
@@ -656,6 +697,12 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
             "audio recording is unsupported on this platform",
         ))
     });
+    let unsupported_source: Callback<RecordingSource, Result<(), RecorderCommandError>> =
+        use_callback(|_| {
+            Err(command_error(
+                "audio recording is unsupported on this platform",
+            ))
+        });
     let mut completed_to_clear = completed;
     let clear_completed = use_callback(move |()| completed_to_clear.set(None));
     let mut completed_to_take = completed;
@@ -674,6 +721,7 @@ fn use_unsupported_audio_recorder() -> AudioRecorder {
         outcome: outcome.into(),
         chunk_delivery_failure: chunk_delivery_failure.into(),
         start: unsupported,
+        start_with_source: unsupported_source,
         pause: unsupported,
         resume: unsupported,
         request_chunk_boundary: unsupported,

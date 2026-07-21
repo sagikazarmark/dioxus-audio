@@ -106,6 +106,33 @@ Input selection is snapshotted by `recorder.start()`. Let users choose a device
 before starting capture; changing `devices.selected()` does not switch an
 active recording.
 
+Browser applications that already own a media stream can wrap it as an opaque
+`RecordingSource` and start without another device acquisition:
+
+```rust
+use dioxus_audio::recorder::RecordingSource;
+
+let source = RecordingSource::from_media_stream(application_stream.clone());
+recorder
+    .start_with_source(source)
+    .expect("Recorder accepted the supplied source");
+```
+
+The application retains the raw stream if it needs to use or stop it later;
+Recorder does not expose that browser resource through its Controller. An
+accepted supplied source must contain exactly one live audio track. Video tracks
+are ignored, and a live audio track remains valid when browser-muted or
+application-disabled. Recorder creates an audio-only recording view and never
+calls `stop()` on the supplied track during completion, discard, startup or
+runtime failure, or unmount.
+
+Capture constraints, microphone permission requests, effective acquired-source
+settings, and Audio Input Device identity apply only to `recorder.start()`.
+Supplied-source startup enters the same source-neutral `Preparing` state, while
+`requested_constraints()`, `settings()`, and completed input identity remain
+unknown. Encoder selection, Recording Chunks, elapsed time, pause and resume,
+Analysis, and completed Recorded Audio behave the same for either source.
+
 `RecorderOptions::constraints` accepts portable `Ideal` or `Exact` requests for
 channel count, sample rate, echo cancellation, noise suppression, and latency.
 The Recorder snapshots those constraints when it accepts `start()`, so changing

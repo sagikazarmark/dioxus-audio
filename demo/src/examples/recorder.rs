@@ -9,11 +9,24 @@ use dioxus_audio::devices::{MicrophonePermission, use_audio_input_devices};
 use dioxus_audio::playback::PlaybackSource;
 use dioxus_audio::recorder::{
     RecorderOptions, RecorderStatus, RecordingChunkDelivery, RecordingConstraint,
-    RecordingConstraints, RecordingOutcome, is_recorder_mime_type_supported, use_audio_recorder,
+    RecordingConstraints, RecordingOutcome, RecordingSource, is_recorder_mime_type_supported,
+    use_audio_recorder,
 };
 use dioxus_audio::{RecordedAudio, RecordingChunk, RecordingId};
+use wasm_bindgen::JsCast;
 
 use crate::components::StatusChip;
+
+struct ApplicationRecordingSource {
+    recorder_source: RecordingSource,
+    stream: web_sys::MediaStream,
+}
+
+impl Drop for ApplicationRecordingSource {
+    fn drop(&mut self) {
+        stop_application_source(self);
+    }
+}
 
 /// Record from a selected input, inspect it, then play it back.
 #[component]
@@ -21,6 +34,7 @@ pub fn RecorderExample() -> Element {
     let mut mounted = use_signal(|| true);
     let mut events = use_signal(Vec::<String>::new);
     let mut recorder_number = use_signal(|| 1_u64);
+    let supplied_source = use_signal(|| None::<ApplicationRecordingSource>);
 
     rsx! {
         div { class: "grid gap-5",
@@ -46,7 +60,7 @@ pub fn RecorderExample() -> Element {
                 }
             }
             if mounted() {
-                RecorderPanel { events, recorder_number: recorder_number() }
+                RecorderPanel { events, recorder_number: recorder_number(), supplied_source }
             } else {
                 p { role: "status", "Recorder unmounted" }
             }
@@ -68,13 +82,20 @@ pub fn RecorderExample() -> Element {
 }
 
 #[component]
-fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Element {
+fn RecorderPanel(
+    mut events: Signal<Vec<String>>,
+    recorder_number: u64,
+    mut supplied_source: Signal<Option<ApplicationRecordingSource>>,
+) -> Element {
     let devices = use_audio_input_devices();
     let mut next_sample_rate = use_signal(|| 48_000_u32);
     let mut require_impossible_rate = use_signal(|| false);
     let mut use_alternate_chunk_callback = use_signal(|| false);
     let mut mime_supported = use_signal(|| None::<bool>);
     let mut recording_ids = use_signal(Vec::<RecordingId>::new);
+    let mut supplied_source_error = use_signal(|| None::<String>);
+    let mut preparing_supplied_source = use_signal(|| false);
+    let mut supplied_source_generation = use_signal(|| 0_u64);
     let sample_rate = if require_impossible_rate() {
         RecordingConstraint::Exact(1)
     } else {
@@ -154,11 +175,8 @@ fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Eleme
     });
     use_effect(move || {
         if let Some(failure) = recorder.chunk_delivery_failure()() {
-            let recording_label = recording_label(
-                recorder_number,
-                &mut recording_ids,
-                failure.recording_id(),
-            );
+            let recording_label =
+                recording_label(recorder_number, &mut recording_ids, failure.recording_id());
             events.write().push(format!(
                 "Chunk delivery failed | {recording_label} | sequence {} | {}",
                 failure.failed_sequence(),
@@ -189,13 +207,20 @@ fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Eleme
         }
     });
     let elapsed = format_duration(recorder.elapsed()().as_secs_f64());
+    let microphone_status = recorder.microphone()();
+    let recorder_permission = format!("{:?}", microphone_status.permission);
+    let recorder_input_identity = microphone_status
+        .input_device
+        .as_ref()
+        .map(|input| input.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     let rejected_constraint = match &status {
         RecorderStatus::Failed(error) => error.overconstrained_constraint().map(str::to_string),
         _ => None,
     };
     let custom_labels = RecorderAnnouncementLabels {
         idle: "Custom recorder idle".to_string(),
-        requesting: "Custom recorder requesting microphone access".to_string(),
+        preparing: "Custom recorder preparing".to_string(),
         recording: "Custom recording active".to_string(),
         paused: "Custom recording on hold".to_string(),
         stopping: "Custom recording finishing".to_string(),
@@ -207,12 +232,76 @@ fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Eleme
             div { class: "flex flex-wrap items-center justify-between gap-3",
                 div {
                     p { class: "text-xs font-semibold uppercase tracking-wider text-base-content/45", "Capture status" }
-                    p { class: "mt-1 font-mono text-2xl tabular-nums", "{elapsed}" }
+                    p {
+                        class: "mt-1 font-mono text-2xl tabular-nums",
+                        role: "timer",
+                        aria_label: "Recording elapsed time",
+                        "{elapsed}"
+                    }
                 }
                 StatusChip { label: format!("{status:?}") }
             }
 
             AudioInputSelector { devices, disabled: active }
+
+            div {
+                class: "grid gap-3 rounded-2xl border border-base-300 bg-base-100 p-4 text-sm",
+                aria_label: "Supplied Recording Source",
+                div { class: "flex flex-wrap gap-2",
+                    button {
+                        class: "btn btn-sm btn-outline",
+                        r#type: "button",
+                        disabled: active || preparing_supplied_source(),
+                        onclick: move |_| {
+                            if preparing_supplied_source() {
+                                return;
+                            }
+                            preparing_supplied_source.set(true);
+                            supplied_source_error.set(None);
+                            spawn(async move {
+                                match acquire_supplied_source().await {
+                                    Ok(source) => {
+                                        supplied_source.write().replace(source);
+                                        supplied_source_generation += 1;
+                                    }
+                                    Err(error) => supplied_source_error.set(Some(error)),
+                                }
+                                preparing_supplied_source.set(false);
+                            });
+                        },
+                        "Prepare supplied Recording Source"
+                    }
+                    button {
+                        class: "btn btn-sm btn-outline",
+                        r#type: "button",
+                        disabled: active || preparing_supplied_source() || supplied_source.read().is_none(),
+                        onclick: move |_| {
+                            supplied_source_error.set(None);
+                            if let Some(source) = supplied_source.peek().as_ref()
+                                && let Err(error) = recorder.start_with_source(source.recorder_source.clone())
+                            {
+                                supplied_source_error.set(Some(error.to_string()));
+                            }
+                        },
+                        "Start supplied recording"
+                    }
+                }
+                p {
+                    "data-generation": supplied_source_generation(),
+                    if preparing_supplied_source() {
+                        "Preparing supplied Recording Source"
+                    } else if supplied_source.read().is_some() {
+                        "Supplied Recording Source ready"
+                    } else {
+                        "No supplied Recording Source"
+                    }
+                }
+                p { "Recorder microphone permission: {recorder_permission}" }
+                p { "Recorder input identity: {recorder_input_identity}" }
+                if let Some(error) = supplied_source_error() {
+                    p { role: "alert", "{error}" }
+                }
+            }
 
             div {
                 class: "grid gap-3 rounded-2xl border border-base-300 bg-base-100 p-4 text-sm",
@@ -341,7 +430,7 @@ fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Eleme
                     }
                     RecorderCancelButton {
                         recorder: custom_recorder,
-                        request_label: "Abort custom microphone request".to_string(),
+                        preparing_label: "Abort custom recording preparation".to_string(),
                         recording_label: "Discard custom recording".to_string(),
                     }
                     RecorderPauseResumeButton {
@@ -369,6 +458,13 @@ fn RecorderPanel(mut events: Signal<Vec<String>>, recorder_number: u64) -> Eleme
                             p { class: "font-semibold", "Recording ready" }
                             p { class: "text-sm text-base-content/60",
                                 "{format_duration(recording.duration.as_secs_f64())} | {recording.audio.mime_type} | {recording.audio.bytes.len()} bytes"
+                            }
+                            p { class: "text-sm text-base-content/60",
+                                if recording.input_device.is_some() {
+                                    "Recorded input identity: known"
+                                } else {
+                                    "Recorded input identity: unknown"
+                                }
                             }
                         }
                         button {
@@ -441,7 +537,7 @@ fn format_duration(seconds: f64) -> String {
 fn recorder_active(status: &RecorderStatus) -> bool {
     matches!(
         status,
-        RecorderStatus::RequestingPermission
+        RecorderStatus::Preparing
             | RecorderStatus::Recording
             | RecorderStatus::Paused
             | RecorderStatus::Stopping
@@ -460,5 +556,37 @@ fn recognition(recognized: bool) -> &'static str {
         "recognized"
     } else {
         "unrecognized"
+    }
+}
+
+async fn acquire_supplied_source() -> Result<ApplicationRecordingSource, String> {
+    let media_devices = web_sys::window()
+        .ok_or_else(|| "browser window is unavailable".to_string())?
+        .navigator()
+        .media_devices()
+        .map_err(|_| "media devices are unavailable".to_string())?;
+    let constraints = web_sys::MediaStreamConstraints::new();
+    constraints.set_audio(&wasm_bindgen::JsValue::TRUE);
+    let value = wasm_bindgen_futures::JsFuture::from(
+        media_devices
+            .get_user_media_with_constraints(&constraints)
+            .map_err(|_| "could not request a Recording Source".to_string())?,
+    )
+    .await
+    .map_err(|_| "could not acquire a Recording Source".to_string())?;
+    let stream = value
+        .dyn_into::<web_sys::MediaStream>()
+        .map_err(|_| "browser returned an invalid Recording Source".to_string())?;
+    Ok(ApplicationRecordingSource {
+        recorder_source: RecordingSource::from_media_stream(stream.clone()),
+        stream,
+    })
+}
+
+fn stop_application_source(source: &ApplicationRecordingSource) {
+    for track in source.stream.get_audio_tracks() {
+        if let Ok(track) = track.dyn_into::<web_sys::MediaStreamTrack>() {
+            track.stop();
+        }
     }
 }

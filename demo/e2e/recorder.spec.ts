@@ -699,16 +699,20 @@ test("source end drains final chunks before completion", async ({
       captureNextConversion?: boolean;
       finalConversionStarted?: boolean;
       finalConversionActive?: boolean;
+      recorderEndedListener?: EventListenerOrEventListenerObject | null;
     };
-    const mediaDevices = navigator.mediaDevices;
-    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
-    Object.defineProperty(mediaDevices, "getUserMedia", {
-      value: async (constraints: MediaStreamConstraints) => {
-        const stream = await getUserMedia(constraints);
-        browser.recorderTrack = stream.getAudioTracks()[0];
-        return stream;
-      },
-    });
+    const addEventListener = MediaStreamTrack.prototype.addEventListener;
+    MediaStreamTrack.prototype.addEventListener = function (
+      type,
+      listener,
+      options,
+    ) {
+      if (type === "ended") {
+        browser.recorderTrack = this;
+        browser.recorderEndedListener = listener;
+      }
+      return addEventListener.call(this, type, listener, options);
+    };
     const onDataAvailable = Object.getOwnPropertyDescriptor(
       MediaRecorder.prototype,
       "ondataavailable",
@@ -764,10 +768,17 @@ test("source end drains final chunks before completion", async ({
   await page.evaluate(() => {
     const browser = globalThis as typeof globalThis & {
       recorderTrack?: MediaStreamTrack;
+      recorderEndedListener?: EventListenerOrEventListenerObject | null;
       captureNextDataEvent?: boolean;
     };
     browser.captureNextDataEvent = true;
-    browser.recorderTrack?.dispatchEvent(new Event("ended"));
+    const listener = browser.recorderEndedListener;
+    const event = new Event("ended");
+    if (typeof listener === "function") {
+      listener.call(browser.recorderTrack, event);
+    } else {
+      listener?.handleEvent(event);
+    }
   });
   await expect
     .poll(() =>
@@ -878,7 +889,7 @@ test("cancelling source acquisition publishes an identified discard", async ({
 
   await demo.getByRole("button", { name: "Start recording" }).click();
   await demo
-    .getByRole("button", { name: "Cancel microphone request" })
+    .getByRole("button", { name: "Cancel recording preparation" })
     .click();
 
   await expect(lifecycle.locator("li")).toHaveText(
@@ -886,6 +897,44 @@ test("cancelling source acquisition publishes an identified discard", async ({
   );
   await page.waitForTimeout(700);
   await expect(lifecycle.locator("li")).toHaveCount(1);
+});
+
+test("a stale acquisition failure cannot change a replacement Recording", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    let acquisition = 0;
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        acquisition += 1;
+        if (acquisition === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          throw new DOMException("stale denial", "NotAllowedError");
+        }
+        return getUserMedia(constraints);
+      },
+    });
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const start = demo.getByRole("button", { name: "Start recording" });
+
+  await start.click();
+  await demo
+    .getByRole("button", { name: "Cancel recording preparation" })
+    .click();
+  await start.click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await page.waitForTimeout(700);
+
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await expect(
+    demo.getByText("Recorder microphone permission: Granted", { exact: true }),
+  ).toBeVisible();
+  await expect(demo.getByText("stale denial", { exact: true })).toHaveCount(0);
 });
 
 test("a cancelled recording is discarded and another can be completed", async ({
@@ -949,3 +998,613 @@ test("an impossible exact constraint reports structured failure", async ({
     "Rejected exact constraint: sampleRate",
   );
 });
+
+test("a supplied Recording Source is analysed, recorded, played, and preserved", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedGetUserMediaCalls?: number;
+      suppliedTrack?: MediaStreamTrack;
+      suppliedSharedConsumer?: MediaStream;
+      suppliedTrackStopCalls?: number;
+      suppliedAnalysisReads?: number;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        browser.suppliedGetUserMediaCalls =
+          (browser.suppliedGetUserMediaCalls ?? 0) + 1;
+        const stream = await getUserMedia(constraints);
+        browser.suppliedTrack = stream.getAudioTracks()[0];
+        browser.suppliedSharedConsumer = new MediaStream([
+          browser.suppliedTrack,
+        ]);
+        return stream;
+      },
+    });
+    const stop = MediaStreamTrack.prototype.stop;
+    MediaStreamTrack.prototype.stop = function () {
+      if (this === browser.suppliedTrack) {
+        browser.suppliedTrackStopCalls =
+          (browser.suppliedTrackStopCalls ?? 0) + 1;
+      }
+      return stop.call(this);
+    };
+    const readTimeDomain = AnalyserNode.prototype.getByteTimeDomainData;
+    AnalyserNode.prototype.getByteTimeDomainData = function (array) {
+      browser.suppliedAnalysisReads =
+        (browser.suppliedAnalysisReads ?? 0) + 1;
+      return readTimeDomain.call(this, array);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+
+  await demo
+    .getByRole("button", { name: "Prepare supplied Recording Source" })
+    .click();
+  await expect(
+    demo.getByText("Supplied Recording Source ready", { exact: true }),
+  ).toBeVisible();
+  await demo
+    .getByRole("button", { name: "Start supplied recording" })
+    .click();
+
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await expect(
+    demo.getByText("Recorder microphone permission: Unknown", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    demo.getByText("Recorder input identity: unknown", { exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          suppliedAnalysisReads?: number;
+        };
+        return browser.suppliedAnalysisReads ?? 0;
+      }),
+    )
+    .toBeGreaterThan(0);
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        suppliedGetUserMediaCalls?: number;
+      };
+      return browser.suppliedGetUserMediaCalls;
+    }),
+  ).toBe(1);
+
+  await page.waitForTimeout(1_100);
+  await demo.getByRole("button", { name: "Pause", exact: true }).click();
+  await expect(
+    demo.getByText("Recording paused", { exact: true }),
+  ).toBeVisible();
+  await expect(demo.getByRole("timer", { name: "Recording elapsed time" })).not.toHaveText(
+    "0:00",
+  );
+  await demo.getByRole("button", { name: "Resume", exact: true }).click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+
+  await demo.getByRole("button", { name: "Stop recording" }).click();
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toBeVisible();
+  await expect(
+    demo.getByText("Recorded input identity: unknown", { exact: true }),
+  ).toBeVisible();
+  await demo.getByRole("button", { name: "Play", exact: true }).click();
+  await expect(
+    demo.getByRole("button", { name: "Pause", exact: true }),
+  ).toBeVisible();
+
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        suppliedTrack?: MediaStreamTrack;
+        suppliedSharedConsumer?: MediaStream;
+        suppliedTrackStopCalls?: number;
+      };
+      return {
+        readyState: browser.suppliedTrack?.readyState,
+        sharedReadyState:
+          browser.suppliedSharedConsumer?.getAudioTracks()[0]?.readyState,
+        stopCalls: browser.suppliedTrackStopCalls ?? 0,
+      };
+    }),
+  ).toEqual({ readyState: "live", sharedReadyState: "live", stopCalls: 0 });
+});
+
+test("supplied Recording Sources reject zero, multiple, and ended audio tracks without stopping them", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      sourceVariant?: "zero" | "multiple" | "ended";
+      sourceTracksByVariant?: Record<string, MediaStreamTrack[]>;
+      suppliedGetUserMediaCalls?: number;
+      suppliedTrackStopCalls?: number;
+    };
+    browser.sourceTracksByVariant = {};
+    const stop = MediaStreamTrack.prototype.stop;
+    MediaStreamTrack.prototype.stop = function () {
+      if (
+        Object.values(browser.sourceTracksByVariant ?? {}).some((tracks) =>
+          tracks.includes(this),
+        )
+      ) {
+        browser.suppliedTrackStopCalls =
+          (browser.suppliedTrackStopCalls ?? 0) + 1;
+      }
+      return stop.call(this);
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        browser.suppliedGetUserMediaCalls =
+          (browser.suppliedGetUserMediaCalls ?? 0) + 1;
+        const acquired = await getUserMedia(constraints);
+        const audio = acquired.getAudioTracks()[0];
+        const variant = browser.sourceVariant ?? "zero";
+        const tracks =
+          variant === "zero"
+            ? []
+            : variant === "multiple"
+              ? [audio, audio.clone()]
+              : [audio];
+        browser.sourceTracksByVariant![variant] = tracks;
+        if (variant === "ended") {
+          audio.stop();
+        }
+        return new MediaStream(tracks);
+      },
+    });
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const prepare = demo.getByRole("button", {
+    name: "Prepare supplied Recording Source",
+  });
+  const start = demo.getByRole("button", { name: "Start supplied recording" });
+
+  const validationCases = [
+    ["zero", "Recording Source must contain exactly one audio track"],
+    ["multiple", "Recording Source must contain exactly one audio track"],
+    ["ended", "Recording Source audio track must be live"],
+  ] as const;
+  for (const [index, [variant, message]] of validationCases.entries()) {
+    await page.evaluate((sourceVariant) => {
+      const browser = globalThis as typeof globalThis & {
+        sourceVariant?: "zero" | "multiple" | "ended";
+      };
+      browser.sourceVariant = sourceVariant;
+    }, variant);
+    await prepare.click();
+    await expect(
+      demo.getByText("Supplied Recording Source ready", { exact: true }),
+    ).toHaveAttribute("data-generation", String(index + 1));
+    const beforeStart = await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        suppliedTrackStopCalls?: number;
+      };
+      return browser.suppliedTrackStopCalls ?? 0;
+    });
+    await start.click();
+    await expect(demo.getByRole("alert")).toHaveText(message);
+    expect(
+      await page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          suppliedTrackStopCalls?: number;
+        };
+        return browser.suppliedTrackStopCalls ?? 0;
+      }),
+    ).toBe(beforeStart);
+    if (variant === "multiple") {
+      expect(
+        await page.evaluate(() => {
+          const browser = globalThis as typeof globalThis & {
+            sourceTracksByVariant?: Record<string, MediaStreamTrack[]>;
+          };
+          return browser.sourceTracksByVariant?.multiple.map(
+            (track) => track.readyState,
+          );
+        }),
+      ).toEqual(["live", "live"]);
+    }
+    if (variant === "ended") {
+      expect(
+        await page.evaluate(() => {
+          const browser = globalThis as typeof globalThis & {
+            sourceTracksByVariant?: Record<string, MediaStreamTrack[]>;
+          };
+          return browser.sourceTracksByVariant?.ended[0].readyState;
+        }),
+      ).toBe("ended");
+    }
+  }
+
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        suppliedGetUserMediaCalls?: number;
+      };
+      return browser.suppliedGetUserMediaCalls;
+    }),
+  ).toBe(3);
+});
+
+test("a supplied disabled and browser-muted audio track records without its video track", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedAudioTrack?: MediaStreamTrack;
+      suppliedVideoTrack?: MediaStreamTrack;
+      suppliedTrackStopCalls?: number;
+      recordedAudioTracks?: number;
+      recordedVideoTracks?: number;
+      suppliedCanvasStream?: MediaStream;
+    };
+    const stop = MediaStreamTrack.prototype.stop;
+    MediaStreamTrack.prototype.stop = function () {
+      if (
+        this === browser.suppliedAudioTrack ||
+        this === browser.suppliedVideoTrack
+      ) {
+        browser.suppliedTrackStopCalls =
+          (browser.suppliedTrackStopCalls ?? 0) + 1;
+      }
+      return stop.call(this);
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const acquired = await getUserMedia(constraints);
+        const audio = acquired.getAudioTracks()[0];
+        audio.enabled = false;
+        Object.defineProperty(audio, "muted", {
+          configurable: true,
+          get: () => true,
+        });
+        const canvas = document.createElement("canvas");
+        const canvasStream = canvas.captureStream();
+        const video = canvasStream.getVideoTracks()[0];
+        browser.suppliedAudioTrack = audio;
+        browser.suppliedVideoTrack = video;
+        browser.suppliedCanvasStream = canvasStream;
+        return new MediaStream([audio, video]);
+      },
+    });
+    const start = MediaRecorder.prototype.start;
+    MediaRecorder.prototype.start = function (timeslice?: number) {
+      browser.recordedAudioTracks = this.stream.getAudioTracks().length;
+      browser.recordedVideoTracks = this.stream.getVideoTracks().length;
+      if (timeslice === undefined) {
+        return start.call(this);
+      }
+      return start.call(this, timeslice);
+    };
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+
+  await demo
+    .getByRole("button", { name: "Prepare supplied Recording Source" })
+    .click();
+  await demo
+    .getByRole("button", { name: "Start supplied recording" })
+    .click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await expect(
+    demo.getByText("Requested sample rate: not started", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    demo.getByText("Recorder microphone permission: Unknown", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    demo.getByText("Microphone muted by the device", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    demo.getByText("Effective sample rate: unknown", { exact: true }),
+  ).toBeVisible();
+
+  await page.waitForTimeout(500);
+  await demo.getByRole("button", { name: "Stop recording" }).click();
+  await expect(
+    demo.getByRole("status").filter({ hasText: "Recording ready" }),
+  ).toBeVisible();
+
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        suppliedAudioTrack?: MediaStreamTrack;
+        suppliedVideoTrack?: MediaStreamTrack;
+        suppliedTrackStopCalls?: number;
+        recordedAudioTracks?: number;
+        recordedVideoTracks?: number;
+      };
+      return {
+        audioEnabled: browser.suppliedAudioTrack?.enabled,
+        audioMuted: browser.suppliedAudioTrack?.muted,
+        audioState: browser.suppliedAudioTrack?.readyState,
+        videoState: browser.suppliedVideoTrack?.readyState,
+        recordedAudioTracks: browser.recordedAudioTracks,
+        recordedVideoTracks: browser.recordedVideoTracks,
+        stopCalls: browser.suppliedTrackStopCalls ?? 0,
+      };
+    }),
+  ).toEqual({
+    audioEnabled: false,
+    audioMuted: true,
+    audioState: "live",
+    videoState: "live",
+    recordedAudioTracks: 1,
+    recordedVideoTracks: 0,
+    stopCalls: 0,
+  });
+});
+
+test("a supplied Recording Source is preserved across every Recorder cleanup path", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      suppliedTrackStopCalls?: number;
+      failSuppliedRecorderConstruction?: boolean;
+      failSuppliedRecorderStart?: boolean;
+      activeSuppliedRecorder?: MediaRecorder;
+      removedSuppliedTrackListeners?: number;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const stream = await getUserMedia(constraints);
+        browser.suppliedTrack = stream.getAudioTracks()[0];
+        return stream;
+      },
+    });
+    const stop = MediaStreamTrack.prototype.stop;
+    MediaStreamTrack.prototype.stop = function () {
+      if (this === browser.suppliedTrack) {
+        browser.suppliedTrackStopCalls =
+          (browser.suppliedTrackStopCalls ?? 0) + 1;
+      }
+      return stop.call(this);
+    };
+    const removeEventListener = MediaStreamTrack.prototype.removeEventListener;
+    MediaStreamTrack.prototype.removeEventListener = function (
+      type,
+      listener,
+      options,
+    ) {
+      if (this.kind === "audio" && ["mute", "unmute", "ended"].includes(type)) {
+        browser.removedSuppliedTrackListeners =
+          (browser.removedSuppliedTrackListeners ?? 0) + 1;
+      }
+      return removeEventListener.call(this, type, listener, options);
+    };
+    const start = MediaRecorder.prototype.start;
+    MediaRecorder.prototype.start = function (timeslice?: number) {
+      browser.activeSuppliedRecorder = this;
+      if (browser.failSuppliedRecorderStart) {
+        throw new DOMException("forced supplied start rejection");
+      }
+      if (timeslice === undefined) {
+        return start.call(this);
+      }
+      return start.call(this, timeslice);
+    };
+    const NativeMediaRecorder = MediaRecorder;
+    Object.defineProperty(globalThis, "MediaRecorder", {
+      configurable: true,
+      value: new Proxy(NativeMediaRecorder, {
+        construct(target, argumentsList) {
+          if (browser.failSuppliedRecorderConstruction) {
+            throw new DOMException("forced supplied startup failure");
+          }
+          return Reflect.construct(target, argumentsList);
+        },
+      }),
+    });
+  });
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+  const lifecycle = demo.getByRole("log", {
+    name: "Recording lifecycle events",
+  });
+  const startSupplied = demo.getByRole("button", {
+    name: "Start supplied recording",
+  });
+
+  await demo
+    .getByRole("button", { name: "Prepare supplied Recording Source" })
+    .click();
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      failSuppliedRecorderConstruction?: boolean;
+    };
+    browser.failSuppliedRecorderConstruction = true;
+  });
+  await startSupplied.click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Failed"),
+      ).length,
+    )
+    .toBe(1);
+  await expectSuppliedTrackToBePreserved(page);
+
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      failSuppliedRecorderConstruction?: boolean;
+      failSuppliedRecorderStart?: boolean;
+    };
+    browser.failSuppliedRecorderConstruction = false;
+    browser.failSuppliedRecorderStart = true;
+  });
+  await startSupplied.click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Failed"),
+      ).length,
+    )
+    .toBe(2);
+  expect(
+    await page.evaluate(() => {
+      const browser = globalThis as typeof globalThis & {
+        activeSuppliedRecorder?: MediaRecorder;
+        removedSuppliedTrackListeners?: number;
+      };
+      return {
+        dataHandler: browser.activeSuppliedRecorder?.ondataavailable ?? null,
+        stopHandler: browser.activeSuppliedRecorder?.onstop ?? null,
+        errorHandler: browser.activeSuppliedRecorder?.onerror ?? null,
+        removedTrackListeners: browser.removedSuppliedTrackListeners ?? 0,
+      };
+    }),
+  ).toEqual({
+    dataHandler: null,
+    stopHandler: null,
+    errorHandler: null,
+    removedTrackListeners: 3,
+  });
+  await expectSuppliedTrackToBePreserved(page);
+
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      failSuppliedRecorderStart?: boolean;
+    };
+    browser.failSuppliedRecorderStart = false;
+  });
+  await startSupplied.click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await demo.getByRole("button", { name: "Cancel recording" }).click();
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Discarded"),
+      ).length,
+    )
+    .toBe(1);
+  await expectSuppliedTrackToBePreserved(page);
+
+  await startSupplied.click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await page.evaluate(() => {
+    const browser = globalThis as typeof globalThis & {
+      activeSuppliedRecorder?: MediaRecorder;
+    };
+    browser.activeSuppliedRecorder?.dispatchEvent(new Event("error"));
+    browser.activeSuppliedRecorder?.stop();
+  });
+  await expect
+    .poll(async () =>
+      (await lifecycle.locator("li").allTextContents()).filter((event) =>
+        event.startsWith("Failed"),
+      ).length,
+    )
+    .toBe(3);
+  await expectSuppliedTrackToBePreserved(page);
+
+  await startSupplied.click();
+  await expect(demo.getByText("Recording", { exact: true }).first()).toBeVisible();
+  await demo.getByRole("button", { name: "Unmount recorder" }).click();
+  await expect(demo.getByText("Recorder unmounted", { exact: true })).toBeVisible();
+  await expectSuppliedTrackToBePreserved(page);
+});
+
+test("unmount cleans up a supplied Recording while browser startup is pending", async ({
+  openRoute,
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const browser = globalThis as typeof globalThis & {
+      suppliedTrack?: MediaStreamTrack;
+      suppliedTrackStopCalls?: number;
+      closedRecorderContexts?: number;
+    };
+    const mediaDevices = navigator.mediaDevices;
+    const getUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
+    Object.defineProperty(mediaDevices, "getUserMedia", {
+      value: async (constraints: MediaStreamConstraints) => {
+        const stream = await getUserMedia(constraints);
+        browser.suppliedTrack = stream.getAudioTracks()[0];
+        return stream;
+      },
+    });
+    const stop = MediaStreamTrack.prototype.stop;
+    MediaStreamTrack.prototype.stop = function () {
+      if (this === browser.suppliedTrack) {
+        browser.suppliedTrackStopCalls =
+          (browser.suppliedTrackStopCalls ?? 0) + 1;
+      }
+      return stop.call(this);
+    };
+    const close = AudioContext.prototype.close;
+    AudioContext.prototype.close = function () {
+      browser.closedRecorderContexts =
+        (browser.closedRecorderContexts ?? 0) + 1;
+      return close.call(this);
+    };
+    MediaRecorder.prototype.start = function () {};
+  });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await openRoute("/recorder", "Capture, inspect, and replay");
+  const demo = page.getByRole("region", { name: "Example demo" });
+
+  await demo
+    .getByRole("button", { name: "Prepare supplied Recording Source" })
+    .click();
+  await demo
+    .getByRole("button", { name: "Start supplied recording" })
+    .click();
+  await expect(demo.getByText("Preparing", { exact: true }).first()).toBeVisible();
+  await demo.getByRole("button", { name: "Unmount recorder" }).click();
+  await expect(demo.getByText("Recorder unmounted", { exact: true })).toBeVisible();
+
+  await expectSuppliedTrackToBePreserved(page);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          closedRecorderContexts?: number;
+        };
+        return browser.closedRecorderContexts ?? 0;
+      }),
+    )
+    .toBe(1);
+  expect(pageErrors).toEqual([]);
+});
+
+async function expectSuppliedTrackToBePreserved(
+  page: import("@playwright/test").Page,
+) {
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const browser = globalThis as typeof globalThis & {
+          suppliedTrack?: MediaStreamTrack;
+          suppliedTrackStopCalls?: number;
+        };
+        return {
+          readyState: browser.suppliedTrack?.readyState,
+          stopCalls: browser.suppliedTrackStopCalls ?? 0,
+        };
+      }),
+    )
+    .toEqual({ readyState: "live", stopCalls: 0 });
+}

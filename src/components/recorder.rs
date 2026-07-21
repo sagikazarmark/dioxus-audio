@@ -8,7 +8,7 @@ use crate::recorder::{AudioRecorder, RecorderStatus};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecorderAnnouncementLabels {
     pub idle: String,
-    pub requesting: String,
+    pub preparing: String,
     pub recording: String,
     pub paused: String,
     pub stopping: String,
@@ -19,7 +19,7 @@ impl Default for RecorderAnnouncementLabels {
     fn default() -> Self {
         Self {
             idle: "Recorder idle".to_string(),
-            requesting: "Requesting microphone access".to_string(),
+            preparing: "Preparing recording".to_string(),
             recording: "Recording".to_string(),
             paused: "Recording paused".to_string(),
             stopping: "Finishing recording".to_string(),
@@ -37,7 +37,7 @@ pub fn RecorderStatusAnnouncer(
     let status = recorder.status()();
     let message = match status {
         RecorderStatus::Idle => labels.idle.as_str(),
-        RecorderStatus::RequestingPermission => labels.requesting.as_str(),
+        RecorderStatus::Preparing => labels.preparing.as_str(),
         RecorderStatus::Recording => labels.recording.as_str(),
         RecorderStatus::Paused => labels.paused.as_str(),
         RecorderStatus::Stopping => labels.stopping.as_str(),
@@ -87,15 +87,15 @@ pub fn RecorderStartButton(
 #[component]
 pub fn RecorderCancelButton(
     recorder: AudioRecorder,
-    #[props(default = "Cancel microphone request".to_string())] request_label: String,
+    #[props(default = "Cancel recording preparation".to_string())] preparing_label: String,
     #[props(default = "Cancel recording".to_string())] recording_label: String,
     #[props(default)] on_cancelled: Option<EventHandler<()>>,
 ) -> Element {
     let status = recorder.status()();
-    let requesting = matches!(status, RecorderStatus::RequestingPermission);
+    let preparing = matches!(status, RecorderStatus::Preparing);
     let disabled = !can_cancel(&status);
-    let aria_label = if requesting {
-        request_label
+    let aria_label = if preparing {
+        preparing_label
     } else {
         recording_label
     };
@@ -204,7 +204,7 @@ fn can_start(status: &RecorderStatus) -> bool {
             error.kind(),
             AudioErrorKind::UnsupportedPlatform | AudioErrorKind::InvalidConfiguration
         ),
-        RecorderStatus::RequestingPermission
+        RecorderStatus::Preparing
         | RecorderStatus::Recording
         | RecorderStatus::Paused
         | RecorderStatus::Stopping => false,
@@ -214,7 +214,7 @@ fn can_start(status: &RecorderStatus) -> bool {
 fn can_cancel(status: &RecorderStatus) -> bool {
     matches!(
         status,
-        RecorderStatus::RequestingPermission | RecorderStatus::Recording | RecorderStatus::Paused
+        RecorderStatus::Preparing | RecorderStatus::Recording | RecorderStatus::Paused
     )
 }
 
@@ -238,7 +238,7 @@ pub fn RecorderControls(
                 RecorderStatus::Idle | RecorderStatus::Failed(_) => rsx! {
                     RecorderStartButton { recorder }
                 },
-                RecorderStatus::RequestingPermission => rsx! {
+                RecorderStatus::Preparing => rsx! {
                     RecorderCancelButton { recorder, on_cancelled }
                 },
                 RecorderStatus::Recording | RecorderStatus::Paused => rsx! {
@@ -257,7 +257,7 @@ pub fn RecorderControls(
 fn recorder_state_name(status: &RecorderStatus) -> &'static str {
     match status {
         RecorderStatus::Idle => "idle",
-        RecorderStatus::RequestingPermission => "requesting",
+        RecorderStatus::Preparing => "preparing",
         RecorderStatus::Recording => "recording",
         RecorderStatus::Paused => "paused",
         RecorderStatus::Stopping => "stopping",

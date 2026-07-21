@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 use dioxus::prelude::*;
 
 use crate::analysis::{WaveformSelection, downsample_peaks};
+use crate::playback::{AudioPlayerController, PlaybackSourceLifecycle};
 use crate::waveform::{AmplitudeMode, AmplitudeSlice, SignedEnvelope, WaveformData};
 
 use super::format_accessible_duration;
@@ -112,6 +113,264 @@ fn signed_envelope_path(values: &[SignedEnvelope], top: f64, height: f64) -> Str
     }
     path.push('Z');
     path
+}
+
+/// Present Playback position and one controlled Waveform Selection over Waveform Data.
+///
+/// The three interactions remain native sliders. Pointer movement is presented as an
+/// internal draft and is committed through the Controller or `on_selection_change`
+/// when the native interaction completes.
+#[component]
+pub fn InteractiveWaveform(
+    data: WaveformData,
+    controller: AudioPlayerController,
+    selection: WaveformSelection,
+    on_selection_change: EventHandler<WaveformSelection>,
+    #[props(default = 512)] bucket_budget: usize,
+    #[props(default = 96.0)] height: f64,
+    #[props(default = 0.01)] fine_step_secs: f64,
+    #[props(default = 1.0)] coarse_step_secs: f64,
+    #[props(default = "Interactive waveform".to_string())] label: String,
+    #[props(default = "Playback position".to_string())] playback_label: String,
+    #[props(default = "Selection start".to_string())] selection_start_label: String,
+    #[props(default = "Selection end".to_string())] selection_end_label: String,
+) -> Element {
+    let waveform_duration = data.duration().as_secs_f64();
+    let playback_duration = controller.duration()().as_secs_f64();
+    let playback_position = controller.position()().as_secs_f64().min(waveform_duration);
+    let playback_source = controller.snapshot()().source;
+    let has_playback_duration = playback_duration.is_finite() && playback_duration > 0.0;
+    let can_seek =
+        has_playback_duration && matches!(playback_source, PlaybackSourceLifecycle::Playable);
+    let seek_end = if has_playback_duration {
+        playback_duration.min(waveform_duration)
+    } else {
+        0.0
+    };
+    let fine_step_secs = positive_step(fine_step_secs, 0.01);
+    let coarse_step_secs = positive_step(coarse_step_secs, 1.0);
+    let controlled_selection = selection.clamped_to_duration(waveform_duration);
+    let mut draft_seek = use_signal(|| None::<f64>);
+    let mut draft_selection = use_signal(|| None::<WaveformSelection>);
+    use_effect(use_reactive!(|(
+        controlled_selection,
+        waveform_duration,
+        seek_end,
+        can_seek,
+    )| {
+        let _ = (controlled_selection, waveform_duration, seek_end, can_seek);
+        draft_selection.set(None);
+        draft_seek.set(None);
+    }));
+    let presented_position = draft_seek().unwrap_or(playback_position);
+    let presented_selection = draft_selection().unwrap_or(controlled_selection);
+    let start_percent = presented_selection.start() / waveform_duration * 100.0;
+    let end_percent = presented_selection.end() / waveform_duration * 100.0;
+    let selection_width = end_percent - start_percent;
+    let position_percent = presented_position / waveform_duration * 100.0;
+    let collapsed = presented_selection.is_collapsed();
+    let position_value_text = format_accessible_duration(presented_position);
+    let start_value_text = format_accessible_duration(presented_selection.start());
+    let end_value_text = format_accessible_duration(presented_selection.end());
+    let (collapse_edge, start_hit_offset, end_hit_offset) = if !collapsed {
+        ("none", "0rem", "0rem")
+    } else if presented_selection.start() == 0.0 {
+        ("start", "0rem", "1.5rem")
+    } else if presented_selection.end() == waveform_duration {
+        ("end", "-1.5rem", "0rem")
+    } else {
+        ("middle", "-0.75rem", "0.75rem")
+    };
+
+    rsx! {
+        div {
+            class: "dioxus-audio dioxus-audio__interactive-waveform",
+            role: "group",
+            aria_label: label,
+            "data-collapsed": collapsed,
+            "data-collapse-edge": collapse_edge,
+            Waveform { data, bucket_budget, height, label: None }
+            div {
+                class: "dioxus-audio__interactive-position",
+                style: "left: {position_percent}%",
+            }
+            div {
+                class: "dioxus-audio__interactive-selection",
+                style: "left: {start_percent}%; width: {selection_width}%",
+            }
+            input {
+                class: "dioxus-audio__interactive-input dioxus-audio__interactive-input--playback",
+                r#type: "range",
+                min: "0",
+                max: "{waveform_duration}",
+                step: "{fine_step_secs}",
+                value: "{presented_position}",
+                disabled: !can_seek,
+                aria_label: playback_label,
+                aria_valuemin: 0.0,
+                aria_valuemax: seek_end,
+                aria_valuetext: position_value_text,
+                oninput: move |event| {
+                    if let Some(value) = source_time(&event.value(), waveform_duration) {
+                        draft_seek.set(Some(value.min(seek_end)));
+                    }
+                },
+                onchange: move |event| {
+                    if let Some(value) = source_time(&event.value(), waveform_duration) {
+                        draft_seek.set(None);
+                        if can_seek {
+                            controller.seek(std::time::Duration::from_secs_f64(
+                                value.min(playback_duration),
+                            ));
+                        }
+                    }
+                },
+                onkeydown: move |event| {
+                    if let Some(value) = keyboard_source_time(
+                        event.key(),
+                        presented_position,
+                        0.0,
+                        seek_end,
+                        fine_step_secs,
+                        coarse_step_secs,
+                    ) {
+                        event.prevent_default();
+                        draft_seek.set(None);
+                        controller.seek(std::time::Duration::from_secs_f64(value));
+                    }
+                },
+                onpointercancel: move |_| draft_seek.set(None),
+            }
+            input {
+                class: "dioxus-audio__interactive-input dioxus-audio__interactive-input--selection dioxus-audio__interactive-input--start",
+                style: "--_dxa-position: {start_percent}%; --_dxa-hit-offset: {start_hit_offset}",
+                r#type: "range",
+                min: "0",
+                max: "{waveform_duration}",
+                step: "{fine_step_secs}",
+                value: "{presented_selection.start()}",
+                aria_label: selection_start_label,
+                aria_valuemin: 0.0,
+                aria_valuemax: presented_selection.end(),
+                aria_valuetext: start_value_text,
+                oninput: move |event| {
+                    if let Some(value) = source_time(&event.value(), waveform_duration) {
+                        let current = *draft_selection.peek();
+                        let current = current.unwrap_or(controlled_selection);
+                        draft_selection.set(Some(current.with_start(value)));
+                    }
+                },
+                onchange: move |event| {
+                    if let Some(value) = source_time(&event.value(), waveform_duration) {
+                        let current = *draft_selection.peek();
+                        let next = current
+                            .unwrap_or(controlled_selection)
+                            .with_start(value)
+                            .clamped_to_duration(waveform_duration);
+                        draft_selection.set(None);
+                        on_selection_change.call(next);
+                    }
+                },
+                onkeydown: move |event| {
+                    if let Some(value) = keyboard_source_time(
+                        event.key(),
+                        presented_selection.start(),
+                        0.0,
+                        presented_selection.end(),
+                        fine_step_secs,
+                        coarse_step_secs,
+                    ) {
+                        event.prevent_default();
+                        draft_selection.set(None);
+                        on_selection_change.call(controlled_selection.with_start(value));
+                    }
+                },
+                onpointercancel: move |_| draft_selection.set(None),
+            }
+            input {
+                class: "dioxus-audio__interactive-input dioxus-audio__interactive-input--selection dioxus-audio__interactive-input--end",
+                style: "--_dxa-position: {end_percent}%; --_dxa-hit-offset: {end_hit_offset}",
+                r#type: "range",
+                min: "0",
+                max: "{waveform_duration}",
+                step: "{fine_step_secs}",
+                value: "{presented_selection.end()}",
+                aria_label: selection_end_label,
+                aria_valuemin: presented_selection.start(),
+                aria_valuemax: waveform_duration,
+                aria_valuetext: end_value_text,
+                oninput: move |event| {
+                    if let Some(value) = source_time(&event.value(), waveform_duration) {
+                        let current = *draft_selection.peek();
+                        let current = current.unwrap_or(controlled_selection);
+                        draft_selection.set(Some(current.with_end(value).clamped_to_duration(waveform_duration)));
+                    }
+                },
+                onchange: move |event| {
+                    if let Some(value) = source_time(&event.value(), waveform_duration) {
+                        let current = *draft_selection.peek();
+                        let next = current
+                            .unwrap_or(controlled_selection)
+                            .with_end(value)
+                            .clamped_to_duration(waveform_duration);
+                        draft_selection.set(None);
+                        on_selection_change.call(next);
+                    }
+                },
+                onkeydown: move |event| {
+                    if let Some(value) = keyboard_source_time(
+                        event.key(),
+                        presented_selection.end(),
+                        presented_selection.start(),
+                        waveform_duration,
+                        fine_step_secs,
+                        coarse_step_secs,
+                    ) {
+                        event.prevent_default();
+                        draft_selection.set(None);
+                        on_selection_change.call(controlled_selection.with_end(value));
+                    }
+                },
+                onpointercancel: move |_| draft_selection.set(None),
+            }
+        }
+    }
+}
+
+fn positive_step(value: f64, fallback: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn source_time(value: &str, duration: f64) -> Option<f64> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, duration))
+}
+
+fn keyboard_source_time(
+    key: Key,
+    current: f64,
+    start: f64,
+    end: f64,
+    fine_step: f64,
+    coarse_step: f64,
+) -> Option<f64> {
+    let value = match key {
+        Key::ArrowDown | Key::ArrowLeft => current - fine_step,
+        Key::ArrowUp | Key::ArrowRight => current + fine_step,
+        Key::Home => start,
+        Key::End => end,
+        Key::PageDown => current - coarse_step,
+        Key::PageUp => current + coarse_step,
+        _ => return None,
+    };
+    Some(value.clamp(start, end))
 }
 
 #[component]

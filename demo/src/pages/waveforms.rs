@@ -10,7 +10,7 @@ pub fn Waveforms() -> Element {
         PageHeader {
             eyebrow: "Processing",
             title: "Preview and select waveform ranges",
-            intro: "Render duration-aware magnitude or signed multichannel Waveform Data alongside compact Peaks and an accessible range selector.",
+            intro: "Render duration-aware magnitude or signed multichannel Waveform Data, then seek Playback and edit a controlled Waveform Selection through an interactive Waveform.",
         }
         ExampleSection {
             title: "Waveform components",
@@ -20,7 +20,9 @@ pub fn Waveforms() -> Element {
                 InlineCode { "Waveform" }
                 " selects a stored resolution by bucket budget and renders each channel without discarding signed shape. "
                 InlineCode { "WaveformRangeSelector" }
-                " reports an ordered selection in source seconds."
+                " reports an ordered selection in source seconds. "
+                InlineCode { "InteractiveWaveform" }
+                " adds three independently named native sliders with keyboard and pointer operation."
             },
             demo: rsx! { WaveformsExample {} },
             code: rsx! {

@@ -19,7 +19,7 @@ pub use recorder::{
     RecorderPauseResumeButton, RecorderStartButton, RecorderStatusAnnouncer, RecorderStopButton,
 };
 pub use visualizer::{LevelMeter, LiveWaveform, SpectrumVisualizer};
-pub use waveform::{Waveform, WaveformPreview, WaveformRangeSelector};
+pub use waveform::{InteractiveWaveform, Waveform, WaveformPreview, WaveformRangeSelector};
 
 /// The supported lower-level equivalent to rendering [`AudioStyles`].
 ///

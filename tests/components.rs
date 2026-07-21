@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use dioxus_audio::analysis::{LiveAnalysisOptions, WaveformSelection, use_live_analysis};
 use dioxus_audio::components::{
-    AudioInputSelector, AudioPlayer, AudioScrubber, LevelMeter, LiveWaveform,
+    AudioInputSelector, AudioPlayer, AudioScrubber, InteractiveWaveform, LevelMeter, LiveWaveform,
     MicrophoneStatusIndicator, PlaybackAnnouncementLabels, PlaybackAudibilitySlider,
     PlaybackMuteButton, PlaybackPlayPauseButton, PlaybackRateButton, PlaybackRepeatButton,
     PlaybackSeekSlider, PlaybackSkipButton, PlaybackStatusAnnouncer, PlaybackStopButton,
@@ -416,6 +416,52 @@ fn waveform_range_selectors_expose_independent_source_time_values() {
     assert!(html.contains("aria-valuetext=\"0.5 seconds\""), "{html}");
     assert!(html.contains("value=\"1.5\""), "{html}");
     assert!(html.contains("aria-valuetext=\"1.5 seconds\""), "{html}");
+}
+
+#[test]
+fn interactive_waveform_exposes_three_named_source_time_sliders() {
+    fn app() -> Element {
+        let source = use_signal(|| None::<PlaybackSource>);
+        let controller = use_audio_player(source.into(), Duration::from_secs(3));
+        let data = WaveformData::from_peaks(Duration::from_secs(12), vec![0, 64, 255, 128, 32, 96])
+            .unwrap();
+
+        rsx! {
+            InteractiveWaveform {
+                data,
+                controller,
+                selection: WaveformSelection::new(2.25, 9.5),
+                on_selection_change: move |_| {},
+                fine_step_secs: 0.25,
+                coarse_step_secs: 2.0,
+                label: "Episode waveform".to_string(),
+                playback_label: "Episode position".to_string(),
+                selection_start_label: "Clip start".to_string(),
+                selection_end_label: "Clip end".to_string(),
+            }
+        }
+    }
+
+    let mut vdom = VirtualDom::new(app);
+    vdom.rebuild_in_place();
+    let html = dioxus_ssr::render(&vdom);
+
+    assert!(html.contains("role=\"group\""), "{html}");
+    assert!(html.contains("aria-label=\"Episode waveform\""), "{html}");
+    assert_eq!(html.matches("type=\"range\"").count(), 3, "{html}");
+    assert_eq!(html.matches("max=\"12\"").count(), 3, "{html}");
+    assert_eq!(html.matches("step=\"0.25\"").count(), 3, "{html}");
+    assert!(html.contains("aria-label=\"Episode position\""), "{html}");
+    assert!(html.contains("aria-valuemax=3"), "{html}");
+    assert!(html.contains("aria-valuetext=\"0 seconds\""), "{html}");
+    assert!(html.contains("aria-label=\"Clip start\""), "{html}");
+    assert!(html.contains("aria-valuemax=9.5"), "{html}");
+    assert!(html.contains("aria-valuetext=\"2.25 seconds\""), "{html}");
+    assert!(html.contains("aria-label=\"Clip end\""), "{html}");
+    assert!(html.contains("aria-valuemin=2.25"), "{html}");
+    assert!(html.contains("aria-valuetext=\"9.5 seconds\""), "{html}");
+    assert!(!html.contains("aria-live"), "{html}");
+    assert!(!html.contains("role=\"status\""), "{html}");
 }
 
 #[test]

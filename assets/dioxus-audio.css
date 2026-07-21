@@ -74,6 +74,147 @@
   opacity: 0.35;
 }
 
+.dioxus-audio__interactive-waveform {
+  position: relative;
+  width: 100%;
+  min-height: 2.75rem;
+  touch-action: pan-y;
+}
+
+.dioxus-audio__interactive-position,
+.dioxus-audio__interactive-selection {
+  position: absolute;
+  inset-block: 0;
+  pointer-events: none;
+}
+
+.dioxus-audio__interactive-position {
+  z-index: 1;
+  width: 2px;
+  transform: translateX(-1px);
+  background: var(--_dxa-content);
+}
+
+.dioxus-audio__interactive-selection {
+  border-inline: 2px solid var(--_dxa-primary);
+  background: color-mix(in srgb, var(--_dxa-primary) 14%, transparent);
+}
+
+.dioxus-audio__interactive-input {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+}
+
+.dioxus-audio__interactive-input--playback {
+  cursor: pointer;
+}
+
+.dioxus-audio__interactive-input--selection {
+  z-index: 3;
+  clip-path: inset(
+    0
+    max(0px, calc(100% - var(--_dxa-position) - var(--_dxa-hit-offset) - 0.875rem))
+    0
+    max(0px, calc(var(--_dxa-position) + var(--_dxa-hit-offset) - 0.875rem))
+  );
+}
+
+.dioxus-audio__interactive-input--selection:focus {
+  z-index: 4;
+}
+
+.dioxus-audio__interactive-input:focus-visible {
+  outline: 2px solid var(--_dxa-primary);
+  outline-offset: 2px;
+  border-radius: var(--_dxa-radius);
+}
+
+.dioxus-audio__interactive-input::-webkit-slider-runnable-track {
+  height: 100%;
+  background: transparent;
+}
+
+.dioxus-audio__interactive-input::-moz-range-track {
+  height: 100%;
+  background: transparent;
+}
+
+.dioxus-audio__interactive-input::-webkit-slider-thumb {
+  width: 0.875rem;
+  height: 100%;
+  appearance: none;
+  border: 0;
+  background: transparent;
+}
+
+.dioxus-audio__interactive-input::-moz-range-thumb {
+  width: 0.875rem;
+  height: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.dioxus-audio__interactive-input--selection::-webkit-slider-thumb {
+  width: 1.5rem;
+  pointer-events: auto;
+  cursor: ew-resize;
+  border: 2px solid var(--_dxa-primary);
+  border-radius: 999px;
+  background: var(--_dxa-base-100);
+}
+
+.dioxus-audio__interactive-input--selection::-moz-range-thumb {
+  width: 1.5rem;
+  pointer-events: auto;
+  cursor: ew-resize;
+  border: 2px solid var(--_dxa-primary);
+  border-radius: 999px;
+  background: var(--_dxa-base-100);
+}
+
+.dioxus-audio__interactive-waveform[data-collapsed="true"] .dioxus-audio__interactive-input--start::-webkit-slider-thumb {
+  transform: translateX(-0.75rem);
+}
+
+.dioxus-audio__interactive-waveform[data-collapsed="true"] .dioxus-audio__interactive-input--end::-webkit-slider-thumb {
+  transform: translateX(0.75rem);
+}
+
+.dioxus-audio__interactive-waveform[data-collapsed="true"] .dioxus-audio__interactive-input--start::-moz-range-thumb {
+  transform: translateX(-0.75rem);
+}
+
+.dioxus-audio__interactive-waveform[data-collapsed="true"] .dioxus-audio__interactive-input--end::-moz-range-thumb {
+  transform: translateX(0.75rem);
+}
+
+.dioxus-audio__interactive-waveform[data-collapse-edge="start"] .dioxus-audio__interactive-input--start::-webkit-slider-thumb,
+.dioxus-audio__interactive-waveform[data-collapse-edge="start"] .dioxus-audio__interactive-input--start::-moz-range-thumb,
+.dioxus-audio__interactive-waveform[data-collapse-edge="end"] .dioxus-audio__interactive-input--end::-webkit-slider-thumb,
+.dioxus-audio__interactive-waveform[data-collapse-edge="end"] .dioxus-audio__interactive-input--end::-moz-range-thumb {
+  transform: none;
+}
+
+.dioxus-audio__interactive-waveform[data-collapse-edge="start"] .dioxus-audio__interactive-input--end::-webkit-slider-thumb,
+.dioxus-audio__interactive-waveform[data-collapse-edge="start"] .dioxus-audio__interactive-input--end::-moz-range-thumb {
+  transform: translateX(1.5rem);
+}
+
+.dioxus-audio__interactive-waveform[data-collapse-edge="end"] .dioxus-audio__interactive-input--start::-webkit-slider-thumb,
+.dioxus-audio__interactive-waveform[data-collapse-edge="end"] .dioxus-audio__interactive-input--start::-moz-range-thumb {
+  transform: translateX(-1.5rem);
+}
+
+.dioxus-audio__interactive-input:disabled {
+  cursor: not-allowed;
+}
+
 .dioxus-audio__range {
   position: relative;
   width: 100%;

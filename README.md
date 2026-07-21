@@ -549,6 +549,20 @@ resolution when none fit, as borrowed channel slices without copying buckets.
 Clone and equality use shared snapshot identity, so independently reconstructed
 data intentionally counts as changed.
 
+`InteractiveWaveform` composes Waveform Data, an `AudioPlayerController`, and
+one controlled `WaveformSelection`. Playback position, selection start, and
+selection end remain independently named native sliders. Arrow keys use the
+configurable fine source-time step, Page Up and Page Down use the coarse step,
+and Home and End honor each control's valid bounds. Selection handles may meet
+but do not cross or exchange identity.
+
+Pointer movement is shown as an internal draft. A handle drag commits one
+selection update on release, while a track click seeks Playback immediately.
+Waveform duration determines rendering and selection bounds; a seek is capped
+by the Controller's authoritative positive Playback duration. Continuously
+changing position and drafts are not live-region announcements, so native
+slider feedback remains the continuous assistive signal.
+
 Use `from_magnitudes` for normalized values in `0.0..=1.0` and
 `from_signed_envelopes` for ordered minimum/maximum pairs in `-1.0..=1.0`.
 `from_peaks` creates one evenly spaced mono Magnitude resolution; this conversion

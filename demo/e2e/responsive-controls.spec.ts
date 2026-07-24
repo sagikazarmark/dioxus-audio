@@ -44,7 +44,10 @@ test("audio controls remain operable in the constrained viewport", async ({
   await expect(start).toBeInViewport();
   await start.click();
 
-  const cancel = page.getByRole("button", { name: "Cancel recording" });
+  const cancel = page.getByRole("button", {
+    name: "Cancel recording",
+    exact: true,
+  });
   await expect(cancel).toBeVisible();
   await cancel.scrollIntoViewIfNeeded();
   await expect(cancel).toBeInViewport();

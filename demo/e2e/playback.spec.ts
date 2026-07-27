@@ -225,6 +225,84 @@ test("URL alternatives skip, fall back, select, and fail terminally", async ({
   await second.dispose();
 });
 
+test("a rejected play attempt outlives the alternative it was requested during", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback-source", "Load local and remote media by URL");
+  await holdAlternativeLoads(page, "probably");
+  await page.evaluate(() => {
+    let holdNext = true;
+    HTMLMediaElement.prototype.play = function () {
+      const testWindow = window as PlaybackTestWindow;
+      testWindow.pendingPlaybackElement = this;
+      if (holdNext) {
+        holdNext = false;
+        return new Promise((_, reject) => {
+          testWindow.rejectPendingPlayback = () =>
+            reject(
+              new DOMException("Playback blocked by test", "NotAllowedError"),
+            );
+        });
+      }
+      return Promise.resolve();
+    };
+  });
+
+  const example = page.getByRole("group", { name: "URL Playback Source" });
+  const state = example.locator(".url-playback-state");
+  await example.getByRole("button", { name: "Load URL alternatives" }).click();
+  await expect(state).toHaveAttribute("data-source", "loading");
+
+  await example
+    .getByRole("button", { name: "Play URL Playback Source" })
+    .click();
+  await expect(state).toHaveAttribute("data-transport", "play-pending");
+  await page.evaluate(() => {
+    (window as PlaybackTestWindow).rejectPendingPlayback?.();
+  });
+  await expect(example.locator(".url-playback-error")).toContainText(
+    "browser rejected playback",
+  );
+  await expect(state).toHaveAttribute("data-play-failure", "present");
+
+  // The attempt the rejection arrived during fails over to the next alternative.
+  await page.evaluate(() => {
+    const element = (window as PlaybackTestWindow).heldPlaybackElements?.[0];
+    if (element) {
+      Object.defineProperty(element, "error", {
+        configurable: true,
+        value: { code: 2 },
+      });
+      element.dispatchEvent(new Event("error"));
+    }
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as PlaybackTestWindow).heldPlaybackElements?.length ?? 0,
+      ),
+    )
+    .toBe(2);
+
+  await page.evaluate(() => {
+    (window as PlaybackTestWindow).heldPlaybackElements?.[1]?.dispatchEvent(
+      new Event("canplay"),
+    );
+  });
+  await expect(state).toHaveAttribute("data-source", "playable");
+  await expect(state).toHaveAttribute("data-play-failure", "present");
+  await expect(example.locator(".url-playback-error")).toContainText(
+    "browser rejected playback",
+  );
+
+  await example
+    .getByRole("button", { name: "Play URL Playback Source" })
+    .click();
+  await expect(state).toHaveAttribute("data-play-failure", "none");
+  await expect(example.locator(".url-playback-error")).toHaveCount(0);
+});
+
 test("network and range observations stay scoped to the current URL attempt", async ({
   openRoute,
   page,
@@ -883,6 +961,77 @@ test("a rejected playback attempt is visible and can be retried", async ({
     );
   });
   await expect(player).toHaveAttribute("data-transport", "playing");
+});
+
+test("a playback attempt rejected while loading stays visible once loaded", async ({
+  openRoute,
+  page,
+}) => {
+  await openRoute("/playback", "Load audio only when it is needed");
+  await holdAlternativeLoads(page, "probably");
+  await page.evaluate(() => {
+    let holdNext = true;
+    HTMLMediaElement.prototype.play = function () {
+      const testWindow = window as PlaybackTestWindow;
+      testWindow.pendingPlaybackElement = this;
+      if (holdNext) {
+        holdNext = false;
+        return new Promise((_, reject) => {
+          testWindow.rejectPendingPlayback = () =>
+            reject(
+              new DOMException("Playback blocked by test", "NotAllowedError"),
+            );
+        });
+      }
+      return Promise.resolve();
+    };
+  });
+
+  const player = page.locator(".dioxus-audio__player");
+  const play = page.getByRole("button", { name: "Play", exact: true });
+  await play.click();
+  await expect(player).toHaveAttribute("data-source", "loading");
+  await expect(player).toHaveAttribute("data-transport", "play-pending");
+
+  await page.evaluate(() => {
+    (window as PlaybackTestWindow).rejectPendingPlayback?.();
+  });
+  await expect(page.getByRole("alert")).toContainText(
+    "browser rejected playback",
+  );
+  await expect(player).toHaveAttribute("data-state", "error");
+  await expect(player).toHaveAttribute("data-transport", "idle");
+  await expect(player).toHaveAttribute(
+    "data-play-failure",
+    "interaction-required",
+  );
+
+  // The load the rejected attempt was waiting on completes.
+  await page.evaluate(() => {
+    const element = (window as PlaybackTestWindow).pendingPlaybackElement;
+    if (element) {
+      Object.defineProperty(element, "duration", {
+        configurable: true,
+        value: 2,
+      });
+      element.dispatchEvent(new Event("loadedmetadata"));
+    }
+  });
+  await expect(player).toHaveAttribute("data-source", "playable");
+  await expect(page.getByRole("alert")).toContainText(
+    "browser rejected playback",
+  );
+  await expect(player).toHaveAttribute("data-state", "error");
+  await expect(player).toHaveAttribute(
+    "data-play-failure",
+    "interaction-required",
+  );
+
+  await play.click();
+  await expect(page.getByRole("alert")).not.toBeVisible();
+  await expect(player).toHaveAttribute("data-play-failure", "none");
+  await expect(player).toHaveAttribute("data-transport", "playing");
+  await expect(player).toHaveAttribute("data-state", "playing");
 });
 
 test("stop resets pending playback and ignores its late outcome", async ({

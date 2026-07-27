@@ -563,6 +563,55 @@ fn rejected_play_is_recoverable_without_failing_the_source() {
 }
 
 #[test]
+fn rejected_play_outlives_the_load_it_was_requested_during() {
+    let mut playback = PlaybackLifecycle::default();
+    playback.dormant();
+    playback.request_play().unwrap();
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Loading);
+    assert_eq!(playback.transport(), PlaybackTransport::PlayPending);
+
+    let error = AudioError::new(AudioErrorKind::PlaybackFailure, "interaction required");
+    let failure = PlaybackPlayFailure::InteractionRequired(error.clone());
+    playback.play_rejected(failure.clone());
+    assert_eq!(playback.transport(), PlaybackTransport::Idle);
+    assert_eq!(playback.status(), &PlaybackStatus::Failed(error.clone()));
+
+    playback.loaded();
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Playable);
+    assert_eq!(playback.play_failure(), Some(&failure));
+    assert_eq!(playback.status(), &PlaybackStatus::Failed(error));
+
+    playback.request_play().unwrap();
+    assert_eq!(playback.transport(), PlaybackTransport::PlayPending);
+    assert_eq!(playback.play_failure(), None);
+    assert_eq!(playback.status(), &PlaybackStatus::Ready);
+}
+
+#[test]
+fn rejected_play_outlives_the_url_attempt_it_was_requested_during() {
+    let mut playback = PlaybackLifecycle::default();
+    playback.dormant();
+    playback.request_play().unwrap();
+
+    let error = AudioError::new(AudioErrorKind::PlaybackFailure, "interaction required");
+    let failure = PlaybackPlayFailure::InteractionRequired(error.clone());
+    playback.play_rejected(failure.clone());
+    assert_eq!(playback.status(), &PlaybackStatus::Failed(error.clone()));
+
+    let alternative = PlaybackSourceAlternative::new("/media/tone.wav").unwrap();
+    playback.metadata_loaded();
+    playback.url_playable(alternative.clone());
+    assert_eq!(playback.source(), &PlaybackSourceLifecycle::Playable);
+    assert_eq!(playback.selected_alternative(), Some(&alternative));
+    assert_eq!(playback.play_failure(), Some(&failure));
+    assert_eq!(playback.status(), &PlaybackStatus::Failed(error));
+
+    playback.request_play().unwrap();
+    assert_eq!(playback.play_failure(), None);
+    assert_eq!(playback.status(), &PlaybackStatus::Ready);
+}
+
+#[test]
 fn waiting_and_terminal_source_failure_do_not_contradict_transport() {
     let mut playback = PlaybackLifecycle::default();
     playback.loaded();

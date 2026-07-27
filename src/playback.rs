@@ -1028,8 +1028,21 @@ impl PlaybackLifecycle {
         self.clear_source_observations();
     }
 
+    /// Report Playback as ready unless a rejected play attempt is still
+    /// awaiting a retry.
+    ///
+    /// A play attempt may be rejected while its Playback Source is still
+    /// loading, so the attempt that becomes playable afterwards must report
+    /// the rejection rather than replace it.
+    fn mark_ready_unless_play_rejected(&mut self) {
+        self.status = match self.snapshot.play_failure.as_ref() {
+            Some(failure) => PlaybackStatus::Failed(failure.error().clone()),
+            None => PlaybackStatus::Ready,
+        };
+    }
+
     pub fn loaded(&mut self) {
-        self.status = PlaybackStatus::Ready;
+        self.mark_ready_unless_play_rejected();
         self.snapshot.source = PlaybackSourceLifecycle::Playable;
         self.snapshot.readiness = PlaybackReadiness::Metadata;
         self.snapshot.bounded_event = None;
@@ -1067,7 +1080,7 @@ impl PlaybackLifecycle {
 
     pub fn url_playable(&mut self, alternative: PlaybackSourceAlternative) {
         if self.snapshot.source == PlaybackSourceLifecycle::Loading {
-            self.status = PlaybackStatus::Ready;
+            self.mark_ready_unless_play_rejected();
             self.snapshot.source = PlaybackSourceLifecycle::Playable;
             self.snapshot.readiness = PlaybackReadiness::Playable;
             self.snapshot.selected_alternative = Some(alternative);

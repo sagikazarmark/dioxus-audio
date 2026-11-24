@@ -309,11 +309,18 @@ pub(crate) mod web {
     }
 
     pub(crate) fn media_devices() -> Result<MediaDevices, AudioError> {
-        web_sys::window()
+        let media_devices = web_sys::window()
             .ok_or_else(AudioError::unsupported)?
             .navigator()
             .media_devices()
-            .map_err(audio_error_from_js)
+            .map_err(audio_error_from_js)?;
+        // Browsers leave `navigator.mediaDevices` undefined outside a secure
+        // context (a page over plain HTTP): no capture there, rather than a
+        // TypeError from the first call on it.
+        if media_devices.is_undefined() {
+            return Err(AudioError::unsupported());
+        }
+        Ok(media_devices)
     }
 
     pub(crate) fn stop_stream(stream: &MediaStream) {
